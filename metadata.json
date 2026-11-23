@@ -1,0 +1,6 @@
+{
+  "name": "SERVEON",
+  "description": "Enterprise AI Customer & Location Intelligence Platform — One Platform. Multiple Industries. Configurable Intelligence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
