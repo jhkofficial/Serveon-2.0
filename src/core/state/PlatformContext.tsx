@@ -307,12 +307,19 @@ function loadPersistedState(): PersistedPlatformState {
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return base;
+    if (!raw) {
+      return autostart ? { ...base, isAuthenticated: true, authMode: 'demo' } : base;
+    }
     const parsed = JSON.parse(raw) as Partial<PersistedPlatformState>;
     const mergedModules: Record<string, ModuleDefinition[]> = { ...base.tenantModules };
+    const knownTenants = [
+      ...DEMO_TENANTS,
+      ...(Array.isArray(parsed.customTenants) ? parsed.customTenants : []),
+    ];
     if (parsed.tenantModules) {
       for (const [tid, list] of Object.entries(parsed.tenantModules)) {
-        mergedModules[tid] = normalizeTenantModules(list);
+        const tenantObj = knownTenants.find((t) => t.id === tid);
+        mergedModules[tid] = normalizeTenantModules(list, tenantObj);
       }
     }
     return {
@@ -669,8 +676,8 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   );
 
   const modules = useMemo(
-    () => normalizeTenantModules(state.tenantModules[activeTenant.id]),
-    [state.tenantModules, activeTenant.id]
+    () => normalizeTenantModules(state.tenantModules[activeTenant.id], activeTenant),
+    [state.tenantModules, activeTenant]
   );
 
   const accessibleModules = useMemo(
@@ -1188,7 +1195,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
       const mod = modules.find((m) => m.module_id === moduleId);
       setState((prev) => {
-        const currentList = normalizeTenantModules(prev.tenantModules[prev.activeTenantId]);
+        const currentList = normalizeTenantModules(
+          prev.tenantModules[prev.activeTenantId],
+          activeTenant
+        );
         const updatedList = currentList.map((m) =>
           m.module_id === moduleId ? { ...m, enabled: nextEnabled } : m
         );
@@ -1226,7 +1236,10 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         return { ok: false, message: msg };
       }
       setState((prev) => {
-        const currentList = normalizeTenantModules(prev.tenantModules[prev.activeTenantId]);
+        const currentList = normalizeTenantModules(
+          prev.tenantModules[prev.activeTenantId],
+          activeTenant
+        );
         const updatedList = currentList.map((m) =>
           m.module_id === moduleId
             ? { ...m, configuration: { ...m.configuration, ...configPatch } }
@@ -1315,7 +1328,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       },
       tenantModules: {
         ...prev.tenantModules,
-        [tenant.id]: normalizeTenantModules(newModules),
+        [tenant.id]: normalizeTenantModules(newModules, tenant),
       },
       tenantIndustryProfileOverrides: {
         ...prev.tenantIndustryProfileOverrides,
@@ -2940,17 +2953,66 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
 
   const openCampaignStudioFromRecommendation = useCallback(
     (rec: Recommendation) => {
+      const initialTargetSegment =
+        rec.entityType === 'territory' ? 'Growth Potential' : rec.segment;
+      const initialMinRisk: 'ALL' | RiskCategory = rec.strategy === 'RETAIN' ? 'Medium' : 'ALL';
+      const initialMinPropensity = rec.strategy === 'DEVELOP' ? 60 : 0;
+
+      // Ensure the pre-populated campaign audience is reachable after consent & suppression filters
+      let resolvedSegment = initialTargetSegment;
+      let resolvedMinRisk = initialMinRisk;
+      let resolvedMinPropensity = initialMinPropensity;
+      let resolvedRegionId = rec.regionId;
+
+      const checkReachable = (
+        regionId: string,
+        targetSegment: string,
+        minRiskCategory: 'ALL' | RiskCategory,
+        minPropensityScore: number
+      ) =>
+        computeCampaignAudience(scopedCustomers, {
+          tenantId: activeTenant.id,
+          businessUnitId: 'ALL',
+          regionId,
+          targetSegment,
+          minRiskCategory,
+          minPropensityScore,
+          respectConsent: true,
+          respectSuppression: true,
+          includeControlGroup: true,
+        }).eligibleReachableCount;
+
+      if (
+        checkReachable(resolvedRegionId, resolvedSegment, resolvedMinRisk, resolvedMinPropensity) ===
+        0
+      ) {
+        resolvedMinRisk = 'ALL';
+        resolvedMinPropensity = 0;
+      }
+      if (
+        checkReachable(resolvedRegionId, resolvedSegment, resolvedMinRisk, resolvedMinPropensity) ===
+        0
+      ) {
+        resolvedSegment = 'ALL';
+      }
+      if (
+        checkReachable(resolvedRegionId, resolvedSegment, resolvedMinRisk, resolvedMinPropensity) ===
+        0
+      ) {
+        resolvedRegionId = 'ALL';
+      }
+
       updateWizardDraft({
         editingCampaignId: undefined,
         step: 1,
         name: `${rec.strategy}: ${rec.regionName} — ${rec.segment}`,
         objective: `${rec.recommendedAction} (${rec.businessRationale})`,
         strategy: rec.strategy,
-        businessUnitId: activeTenant.businessUnits[0]?.id ?? 'ALL',
-        regionId: rec.regionId,
-        targetSegment: rec.entityType === 'territory' ? 'Growth Potential' : rec.segment,
-        minRiskCategory: rec.strategy === 'RETAIN' ? 'Medium' : 'ALL',
-        minPropensityScore: rec.strategy === 'DEVELOP' ? 60 : 0,
+        businessUnitId: 'ALL',
+        regionId: resolvedRegionId,
+        targetSegment: resolvedSegment,
+        minRiskCategory: resolvedMinRisk,
+        minPropensityScore: resolvedMinPropensity,
         channels: [rec.suggestedChannel],
         messageSubject: `${rec.strategy} Program — ${activeTenant.shortName}`,
         messageBody: `${rec.recommendedAction}. Designed for ${rec.segment} in ${rec.regionName}.`,
@@ -2963,7 +3025,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       });
       navigateToRoute('campaign_studio');
     },
-    [activeTenant, updateWizardDraft, navigateToRoute]
+    [activeTenant, scopedCustomers, updateWizardDraft, navigateToRoute]
   );
 
   const openPredictionExplanation = useCallback(
@@ -3045,6 +3107,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     setSelectedPredictionId(null);
     setSelectedCampaignId(null);
     setPendingCampaignDraft(null);
+    setGeoDrilldownState({ districtId: 'ALL', villageId: 'ALL' });
+    setCustomerRiskFilter('ALL');
+    setAiPanelOpen(false);
     showToast('All demo data, tenants, industry profiles, modules, and rules restored.');
   }, [state.activeRoleId, persona, showToast]);
 

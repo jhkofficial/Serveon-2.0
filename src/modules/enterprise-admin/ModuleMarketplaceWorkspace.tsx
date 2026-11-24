@@ -224,6 +224,7 @@ export function ModuleMarketplaceWorkspace() {
                   ) : (
                     <button
                       type="button"
+                      aria-label={`${mod.enabled ? 'Deactivate' : 'Activate'} ${mod.module_id} ${mod.module_name}`}
                       onClick={() => handleToggle(mod)}
                       className={`rounded-md px-3 py-1.5 text-xs font-semibold transition-colors ${
                         mod.enabled
