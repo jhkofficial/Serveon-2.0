@@ -128,6 +128,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     filters,
     permittedRegionIds,
     aiPanelOpen,
+    mapFullscreen,
     toastMessage,
     switchTenant,
     setIndustryOverride,
@@ -135,8 +136,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     switchRole,
     navigateToRoute,
     setAiPanelOpen,
+    setMapFullscreen,
     signOut,
   } = usePlatform();
+
+  const isLocationRoute = activeRoute === 'location';
+  const isMapFullscreen = isLocationRoute && mapFullscreen;
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -382,18 +387,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen bg-[#F5F8FC] text-slate-900">
-      {/* Desktop Left Sidebar */}
-      <aside
-        className={`hidden shrink-0 transition-[width] duration-200 lg:block ${
-          sidebarCollapsed ? 'w-[72px]' : 'w-[258px]'
-        }`}
-      >
-        <div className="sticky top-0 h-screen">{sidebarContent(false)}</div>
-      </aside>
+      {/* Desktop Left Sidebar (hidden during Location Intelligence fullscreen mode) */}
+      {!isMapFullscreen && (
+        <aside
+          data-testid="app-sidebar"
+          className={`hidden shrink-0 transition-[width] duration-200 lg:block ${
+            sidebarCollapsed ? 'w-[72px]' : 'w-[258px]'
+          }`}
+        >
+          <div className="sticky top-0 h-screen">{sidebarContent(false)}</div>
+        </aside>
+      )}
 
-      {/* Mobile Drawer Sidebar */}
+      {/* Mobile / Fullscreen Slide-Out Drawer Sidebar */}
       {mobileNavOpen && (
-        <div className="fixed inset-0 z-50 flex lg:hidden">
+        <div className={`fixed inset-0 z-50 flex ${isMapFullscreen ? '' : 'lg:hidden'}`}>
           <div
             className="fixed inset-0 bg-slate-900/50"
             onClick={() => setMobileNavOpen(false)}
@@ -406,31 +414,42 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {/* Main Column */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Top Navigation Bar */}
-        <header className="sticky top-0 z-30 flex h-16 items-center justify-between gap-4 border-b border-slate-200 bg-white px-4 sm:px-6">
-          <div className="flex min-w-0 items-center gap-3">
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 sm:px-4 xl:gap-4 xl:px-5">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
             <button
               type="button"
               onClick={() => setMobileNavOpen(true)}
               aria-label="Open navigation menu"
-              className="inline-flex rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900 lg:hidden"
+              className={`inline-flex rounded-md p-2 text-slate-600 hover:bg-slate-100 hover:text-slate-900 ${
+                isMapFullscreen ? '' : 'lg:hidden'
+              }`}
             >
               <Menu className="h-5 w-5" />
             </button>
-            <div className="hidden min-w-0 items-center gap-2 text-sm xl:flex">
+            <div className="hidden min-w-0 items-center gap-1.5 text-sm sm:flex">
               <span className="font-semibold text-[#102B4D] whitespace-nowrap">SERVEON</span>
               <span className="text-slate-300">/</span>
               <span className="truncate font-medium text-slate-700">
                 {activeNavItem?.label ?? 'Executive Dashboard'}
               </span>
+              {isMapFullscreen && (
+                <button
+                  type="button"
+                  onClick={() => setMapFullscreen(false)}
+                  className="ml-1.5 rounded-md border border-slate-300 bg-slate-50 px-2 py-0.5 text-[11px] font-semibold text-[#102B4D] hover:bg-slate-100 whitespace-nowrap"
+                >
+                  Show Sidebar
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="flex min-w-0 items-center gap-2.5 overflow-x-auto">
+          <div className="flex shrink-0 items-center gap-1.5 xl:gap-2.5">
             {/* Tenant Selector */}
             <div className="flex items-center gap-1.5">
               <label
                 htmlFor="topbar-tenant-select"
-                className="hidden text-xs font-medium text-slate-500 md:inline whitespace-nowrap"
+                className="hidden text-xs font-medium text-slate-500 xl:inline whitespace-nowrap"
               >
                 Tenant
               </label>
@@ -445,7 +464,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     ? 'Switch demonstration tenant'
                     : 'Tenant switching is restricted for scoped operational roles'
                 }
-                className="h-9 max-w-[190px] truncate rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500"
+                className="h-9 max-w-[125px] truncate rounded-lg border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 xl:max-w-[175px] xl:px-2.5"
               >
                 {tenants.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -459,7 +478,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="hidden items-center gap-1.5 sm:flex">
               <label
                 htmlFor="topbar-industry-select"
-                className="hidden text-xs font-medium text-slate-500 md:inline whitespace-nowrap"
+                className="hidden text-xs font-medium text-slate-500 xl:inline whitespace-nowrap"
               >
                 Industry
               </label>
@@ -468,7 +487,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 aria-label="Select industry profile"
                 value={activeIndustry.id}
                 onChange={(e) => setIndustryOverride(e.target.value as IndustryId)}
-                className="h-9 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none"
+                className="h-9 max-w-[155px] truncate rounded-lg border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none xl:max-w-[215px] xl:px-2.5"
               >
                 {INDUSTRY_LIST.map((ind) => (
                   <option key={ind.id} value={ind.id}>
@@ -482,7 +501,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <div className="hidden items-center gap-1.5 md:flex">
               <label
                 htmlFor="topbar-region-select"
-                className="text-xs font-medium text-slate-500 whitespace-nowrap"
+                className="hidden text-xs font-medium text-slate-500 xl:inline whitespace-nowrap"
               >
                 Region
               </label>
@@ -491,7 +510,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 aria-label="Filter by region"
                 value={filters.regionId}
                 onChange={(e) => setFilters({ regionId: e.target.value })}
-                className="h-9 max-w-[195px] truncate rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none"
+                className="h-9 max-w-[135px] truncate rounded-lg border border-slate-300 bg-white px-2 text-xs font-medium text-slate-800 focus:border-[#1769AA] focus:outline-none xl:max-w-[185px] xl:px-2.5"
               >
                 {permittedRegions.length > 1 && (
                   <option value="ALL">All {activeTenant.primaryProvinceName}</option>
@@ -509,7 +528,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={() => setAiPanelOpen(!aiPanelOpen)}
               aria-expanded={aiPanelOpen}
-              className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-lg px-3.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+              className={`inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-colors whitespace-nowrap xl:gap-2 xl:px-3.5 ${
                 aiPanelOpen
                   ? 'bg-[#102B4D] text-white'
                   : 'bg-[#1769AA] text-white hover:bg-[#102B4D]'
@@ -522,7 +541,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         {/* Main Workspace Canvas */}
-        <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8">
+        <main
+          className={
+            isLocationRoute
+              ? 'w-full flex-1 px-3 py-2.5 sm:px-4'
+              : 'mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8'
+          }
+        >
           {children}
         </main>
       </div>

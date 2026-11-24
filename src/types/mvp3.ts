@@ -305,4 +305,6 @@ export interface CampaignDraftWizardState {
   scheduledDate: string;
   budgetAllocated: number;
   linkedRecommendationId?: string;
+  geoCustomerIds?: string[];
+  geoSelectionLabel?: string;
 }

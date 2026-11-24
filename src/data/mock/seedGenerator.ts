@@ -118,15 +118,40 @@ function buildExtensionAttributes(
 
   if (industry === 'automotive') {
     const isDaihatsu = tenantId === 'tenant-daihatsu';
-    const models = isDaihatsu
-      ? ['Sigra 1.2 R Deluxe', 'Terios R Custom', 'Xenia 1.5 R ASA', 'Rocky 1.2 X CVT', 'Gran Max Blind Van']
-      : ['Avanza 1.5 G CVT', 'Innova Zenix Hybrid', 'Raize 1.0T GR Sport', 'Fortuner 2.8 VRZ', 'Yaris Cross Hybrid'];
-    const warranties = isDaihatsu
-      ? ['Active 3-Yr Daihatsu Warranty', 'Sahabat Care Package', 'Expiring < 90 Days', 'Fleet Maintenance SLA']
-      : ['T-Care 3-Yr Free Service', 'Extended Warranty Plus', 'Expiring < 90 Days', 'Out of Warranty'];
-    const finance = isDaihatsu
-      ? ['ACC Multi-Finance 48m', 'Cash Purchase', 'SME Commercial Fleet Lease', 'Bank Auto Loan 60m']
-      : ['TAF / ACC Financing 48m', 'Cash Purchase', 'Bank Auto Loan 60m', 'Corporate Fleet Lease'];
+    const isLexus = tenantId === 'tenant-lexus';
+    const isBmw = tenantId === 'tenant-bmw';
+    const isIsuzu = tenantId === 'tenant-isuzu';
+
+    const models = isLexus
+      ? ['Lexus RX 350h Luxury', 'Lexus NX 350h F Sport', 'Lexus LM 350h Executive', 'Lexus ES 300h Ultra Luxury', 'Lexus RZ 450e BEV']
+      : isBmw
+        ? ['BMW 320i M Sport', 'BMW X1 sDrive18i xLine', 'BMW X3 xDrive30i M Sport', 'BMW 520i M Sport', 'BMW iX xDrive40 Electric']
+        : isIsuzu
+          ? ['Isuzu Traga Euro4 Box', 'Isuzu ELF NMR HD 5.8', 'Isuzu GIGA FVR Logistics', 'Isuzu MU-X 4x4 Commercial', 'Isuzu D-Max Double Cabin']
+          : isDaihatsu
+            ? ['Sigra 1.2 R Deluxe', 'Terios R Custom', 'Xenia 1.5 R ASA', 'Rocky 1.2 X CVT', 'Gran Max Blind Van']
+            : ['Avanza 1.5 G CVT', 'Innova Zenix Hybrid', 'Raize 1.0T GR Sport', 'Fortuner 2.8 VRZ', 'Yaris Cross Hybrid'];
+
+    const warranties = isLexus
+      ? ['Lexus 5-Yr Free Service & Hybrid Care', 'Omotenashi Battery Warranty 8-Yr', 'Expiring < 90 Days', 'VVIP Concierge SLA']
+      : isBmw
+        ? ['BMW Service Inclusive 5-Yr', 'BMW Repair Inclusive Active', 'Expiring < 90 Days', 'BMW i Battery Warranty 8-Yr']
+        : isIsuzu
+          ? ['Isuzu Euro4 Fleet Maintenance SLA', 'Active 3-Yr Commercial Warranty', 'Expiring < 90 Days', 'High-Mileage Service Contract']
+          : isDaihatsu
+            ? ['Active 3-Yr Daihatsu Warranty', 'Sahabat Care Package', 'Expiring < 90 Days', 'Fleet Maintenance SLA']
+            : ['T-Care 3-Yr Free Service', 'Extended Warranty Plus', 'Expiring < 90 Days', 'Out of Warranty'];
+
+    const finance = isLexus
+      ? ['Private Wealth Direct Purchase', 'Executive Corporate Lease 36m', 'Priority Bank Auto Finance', 'Diplomatic Fleet Program']
+      : isBmw
+        ? ['BMW Financial Services 48m', 'Cash Purchase', 'Executive Corporate Lease', 'Hospitality EV Fleet Finance']
+        : isIsuzu
+          ? ['Commercial Fleet Leasing 48m', 'B2B Logistics Credit Line', 'ACC / SANF Truck Financing', 'Corporate Cash Purchase']
+          : isDaihatsu
+            ? ['ACC Multi-Finance 48m', 'Cash Purchase', 'SME Commercial Fleet Lease', 'Bank Auto Loan 60m']
+            : ['TAF / ACC Financing 48m', 'Cash Purchase', 'Bank Auto Loan 60m', 'Corporate Fleet Lease'];
+
     const vehicleModel = models[Math.floor(rand() * models.length)];
     return {
       attrs: {
@@ -135,32 +160,74 @@ function buildExtensionAttributes(
         warranty_status: warranties[Math.floor(rand() * warranties.length)],
         financing_partner: finance[Math.floor(rand() * finance.length)],
       },
-      productPool: isDaihatsu
+      productPool: isLexus
         ? [
-            { name: `${vehicleModel} Unit`, category: 'Vehicle Sales', baseAmount: 225_000_000 },
-            { name: 'Sahabat Daihatsu 10,000 km Periodic Service', category: 'After-Sales Service', baseAmount: 2_350_000 },
-            { name: 'Gran Max Commercial Fleet Brake & Clutch Care', category: 'Parts & Maintenance', baseAmount: 3_600_000 },
-            { name: 'Daihatsu Genuine Body & Rust Protection', category: 'Care Add-on', baseAmount: 4_400_000 },
+            { name: `${vehicleModel} Unit`, category: 'Luxury Vehicle Sales', baseAmount: 1_550_000_000 },
+            { name: 'Lexus Omotenashi 10,000 km Concierge Service', category: 'Concierge After-Sales', baseAmount: 9_800_000 },
+            { name: 'Lexus Hybrid Battery & Ceramic Detailing Care', category: 'EV & Hybrid Care', baseAmount: 14_500_000 },
+            { name: 'Lexus Extended Care & Genuine Tire Package', category: 'VVIP Care Add-on', baseAmount: 22_000_000 },
           ]
-        : [
-            { name: `${vehicleModel} Unit`, category: 'Vehicle Sales', baseAmount: 365_000_000 },
-            { name: 'Auto2000 T-Care 20,000 km Periodic Service', category: 'After-Sales Service', baseAmount: 3_850_000 },
-            { name: 'THS Home Service & Brake Care Package', category: 'Parts & Maintenance', baseAmount: 5_100_000 },
-            { name: 'Auto2000 Body & Paint Protection Plan', category: 'Care Add-on', baseAmount: 6_800_000 },
-          ],
-      nbaList: isDaihatsu
+        : isBmw
+          ? [
+              { name: `${vehicleModel} Unit`, category: 'Premium Vehicle Sales', baseAmount: 1_180_000_000 },
+              { name: 'BMW Service Inclusive Periodic Inspection', category: 'Authorized Service', baseAmount: 8_400_000 },
+              { name: 'BMW M Performance Brake & Tire Renewal', category: 'Parts & Maintenance', baseAmount: 16_200_000 },
+              { name: 'BMW ConnectedDrive & Extended Warranty Plan', category: 'Care Add-on', baseAmount: 19_500_000 },
+            ]
+          : isIsuzu
+            ? [
+                { name: `${vehicleModel} Unit`, category: 'Commercial Fleet Sales', baseAmount: 420_000_000 },
+                { name: 'Bengkel Isuzu Berjalan (BIB) On-Site Euro4 Service', category: 'Mobile Fleet Service', baseAmount: 4_800_000 },
+                { name: 'Isuzu Genuine Common-Rail Injector & Brake Kit', category: 'Commercial Parts', baseAmount: 7_900_000 },
+                { name: 'Heavy-Duty Fleet Uptime & Overhaul Contract', category: 'Fleet Care SLA', baseAmount: 12_600_000 },
+              ]
+            : isDaihatsu
+              ? [
+                  { name: `${vehicleModel} Unit`, category: 'Vehicle Sales', baseAmount: 225_000_000 },
+                  { name: 'Sahabat Daihatsu 10,000 km Periodic Service', category: 'After-Sales Service', baseAmount: 2_350_000 },
+                  { name: 'Gran Max Commercial Fleet Brake & Clutch Care', category: 'Parts & Maintenance', baseAmount: 3_600_000 },
+                  { name: 'Daihatsu Genuine Body & Rust Protection', category: 'Care Add-on', baseAmount: 4_400_000 },
+                ]
+              : [
+                  { name: `${vehicleModel} Unit`, category: 'Vehicle Sales', baseAmount: 365_000_000 },
+                  { name: 'Auto2000 T-Care 20,000 km Periodic Service', category: 'After-Sales Service', baseAmount: 3_850_000 },
+                  { name: 'THS Home Service & Brake Care Package', category: 'Parts & Maintenance', baseAmount: 5_100_000 },
+                  { name: 'Auto2000 Body & Paint Protection Plan', category: 'Care Add-on', baseAmount: 6_800_000 },
+                ],
+      nbaList: isLexus
         ? [
-            'Schedule Sahabat Daihatsu 10,000 km service slot via WhatsApp with free cabin filter check',
-            'Offer commercial Gran Max SME fleet renewal & trade-in valuation at regional branch',
-            'Assign Workshop Advisor call for overdue periodic maintenance check-in',
-            'Present Rocky / Terios family upgrade quote with pre-screened ACC financing',
+            'Arrange Lexus Omotenashi pick-up & delivery periodic service via dedicated Personal Concierge',
+            'Invite VVIP owner to private Lexus LM 350h / RZ 450e electrified preview at Menteng Gallery',
+            'Offer complimentary hybrid battery health certification ahead of warranty milestone',
+            'Propose executive fleet renewal package with bespoke interior & extended service SLA',
           ]
-        : [
-            'Schedule Auto2000 THS Home Service or 20,000 km periodic workshop bay via WhatsApp',
-            'Offer 36-month trade-in valuation toward Innova Zenix / Yaris Cross Hybrid upgrade',
-            'Assign Service Advisor call for overdue T-Care maintenance check-in',
-            'Enroll owner in Extended Care Plus & Body-Paint protection package',
-          ],
+        : isBmw
+          ? [
+              'Schedule BMW Fast-Lane periodic maintenance with complimentary courtesy vehicle via WhatsApp',
+              'Invite loyal 3 Series / X1 owner to private BMW iX & 5 Series electrified test drive',
+              'Contact owner ahead of BMW Service Inclusive expiry with 24-month extension proposal',
+              'Offer M Performance tire & brake inspection ahead of Bali peak touring season',
+            ]
+          : isIsuzu
+            ? [
+                'Dispatch Bengkel Isuzu Berjalan (BIB) mobile workshop for overdue Euro4 fleet maintenance',
+                'Present ELF & Traga logistics fleet expansion quote with B2B leasing pre-approval',
+                'Alert fleet coordinator on high-mileage GIGA genuine filter & injector preventive package',
+                'Enroll commercial operator in Jawa Timur 24/7 fleet uptime & genuine parts SLA',
+              ]
+            : isDaihatsu
+              ? [
+                  'Schedule Sahabat Daihatsu 10,000 km service slot via WhatsApp with free cabin filter check',
+                  'Offer commercial Gran Max SME fleet renewal & trade-in valuation at regional branch',
+                  'Assign Workshop Advisor call for overdue periodic maintenance check-in',
+                  'Present Rocky / Terios family upgrade quote with pre-screened ACC financing',
+                ]
+              : [
+                  'Schedule Auto2000 THS Home Service or 20,000 km periodic workshop bay via WhatsApp',
+                  'Offer 36-month trade-in valuation toward Innova Zenix / Yaris Cross Hybrid upgrade',
+                  'Assign Service Advisor call for overdue T-Care maintenance check-in',
+                  'Enroll owner in Extended Care Plus & Body-Paint protection package',
+                ],
     };
   }
 
@@ -566,23 +633,50 @@ function buildSeedCampaigns(tenant: Tenant, customers: CustomerRecord[]): Campai
           o3: 'Target delivery and mid-market corporate fleets across primary regency.',
         }
       : tenant.defaultIndustryId === 'automotive'
-        ? tenant.id === 'tenant-daihatsu'
+        ? tenant.id === 'tenant-lexus'
           ? {
-              c1: 'Sahabat Daihatsu Periodic Workshop Reactivation',
-              o1: 'Re-engage overdue Jawa Barat family & commercial owners with free multi-point check.',
-              c2: 'Terios & Rocky Loyal Owner Trade-In Program',
-              o2: 'Offer priority trade-in valuation and ACC financing to 36-month owners.',
-              c3: `${r0.name} Gran Max SME Commercial Fleet Push`,
-              o3: 'Acquire commercial logistics & SME fleet accounts in high-opportunity corridor.',
+              c1: 'Lexus Omotenashi Periodic Concierge Reactivation',
+              o1: 'Re-engage overdue DKI Jakarta luxury hybrid & BEV owners with white-glove pick-up service.',
+              c2: 'LM 350h & RX 350h Private Electrified Preview',
+              o2: 'Invite loyal Lexus owners to private Gallery preview and bespoke trade-in valuation.',
+              c3: `${r0.name} VVIP & Executive Fleet Renewal`,
+              o3: 'Expand executive and diplomatic electrified vehicle fleet relationships across Jakarta.',
             }
-          : {
-              c1: 'Auto2000 T-Care & THS Home Service Reactivation Q4',
-              o1: 'Re-engage overdue DKI Jakarta workshop owners with complimentary multi-point inspection.',
-              c2: 'Innova Zenix & Yaris Cross Hybrid Trade-In Preview',
-              o2: 'Convert 36-month loyal vehicle owners to next-gen hybrid lineup.',
-              c3: `${r0.name} Corporate Fleet & Mobility Outreach`,
-              o3: 'Target executive and corporate fleet prospects across primary metro.',
-            }
+          : tenant.id === 'tenant-bmw'
+            ? {
+                c1: 'BMW Service Inclusive Plus Reactivation Q4',
+                o1: 'Re-engage overdue Bali BMW owners ahead of Service Inclusive expiry with Fast-Lane slots.',
+                c2: 'BMW iX & 5 Series Executive Trade-In Preview',
+                o2: 'Convert loyal 3 Series and X1 owners into electrified BMW i and executive sedans.',
+                c3: `${r0.name} Premium Hospitality & EV Fleet Drive`,
+                o3: 'Target luxury hospitality and executive mobility fleets across Denpasar and Badung.',
+              }
+            : tenant.id === 'tenant-isuzu'
+              ? {
+                  c1: 'Isuzu BIB Mobile Workshop & Euro4 Fleet Retention',
+                  o1: 'Dispatch Bengkel Isuzu Berjalan teams to overdue Jawa Timur commercial fleet operators.',
+                  c2: 'ELF & Traga SME Logistics Fleet Expansion',
+                  o2: 'Offer multi-unit commercial fleet financing and trade-in bundles to loyal operators.',
+                  c3: `${r0.name} High-Mileage GIGA Parts & Uptime SLA`,
+                  o3: 'Grow genuine common-rail parts and preventive overhaul contracts in industrial corridors.',
+                }
+              : tenant.id === 'tenant-daihatsu'
+                ? {
+                    c1: 'Sahabat Daihatsu Periodic Workshop Reactivation',
+                    o1: 'Re-engage overdue Jawa Barat family & commercial owners with free multi-point check.',
+                    c2: 'Terios & Rocky Loyal Owner Trade-In Program',
+                    o2: 'Offer priority trade-in valuation and ACC financing to 36-month owners.',
+                    c3: `${r0.name} Gran Max SME Commercial Fleet Push`,
+                    o3: 'Acquire commercial logistics & SME fleet accounts in high-opportunity corridor.',
+                  }
+                : {
+                    c1: 'Auto2000 T-Care & THS Home Service Reactivation Q4',
+                    o1: 'Re-engage overdue DKI Jakarta workshop owners with complimentary multi-point inspection.',
+                    c2: 'Innova Zenix & Yaris Cross Hybrid Trade-In Preview',
+                    o2: 'Convert 36-month loyal vehicle owners to next-gen hybrid lineup.',
+                    c3: `${r0.name} Corporate Fleet & Mobility Outreach`,
+                    o3: 'Target executive and corporate fleet prospects across primary metro.',
+                  }
         : tenant.defaultIndustryId === 'automotive_parts'
           ? {
               c1: 'Autopart Lapsing B2B Workshop Restock Recovery',

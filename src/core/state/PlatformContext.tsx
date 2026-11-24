@@ -96,7 +96,7 @@ import {
   buildInitialUsersForTenant,
 } from './mvp4SeedState';
 
-const STORAGE_KEY = 'serveon_platform_state_v5';
+const STORAGE_KEY = 'serveon_platform_state_v6';
 
 export const PLATFORM_ONLY_ROUTES: WorkspaceRouteId[] = [
   'ent_overview',
@@ -215,7 +215,7 @@ function buildInitialAuditLogs(): AuditLogEntry[] {
       category: 'System',
       action: 'Initialized 6 Isolated Enterprise Demo Tenants',
       details:
-        'Loaded deterministic synthetic datasets for Astra Motor (default), Auto2000, Daihatsu, Bank Saqu, Astralife, and Autopart with tenant-specific industry profiles and module configurations.',
+        'Loaded deterministic synthetic datasets for Astra Motor (default), Auto2000, Daihatsu, Lexus, BMW, and Isuzu with tenant-specific industry profiles and module configurations.',
       objectRef: defaultTenant.id,
       outcome: 'Success',
     },
@@ -417,6 +417,7 @@ interface PlatformContextValue {
   permittedBranchIds: string[];
   analytics: DashboardAnalyticsSnapshot;
   aiPanelOpen: boolean;
+  mapFullscreen: boolean;
   selectedCustomerId: string | null;
   selectedPredictionId: string | null;
   selectedCampaignId: string | null;
@@ -495,6 +496,14 @@ interface PlatformContextValue {
   approveModelRetraining: (modelId: string, notes: string) => { ok: boolean; message: string };
   openCampaignComposerFromAction: (draft: Partial<CreateCampaignInput>) => void;
   openCampaignStudioFromRecommendation: (rec: Recommendation) => void;
+  openCampaignStudioFromGeoSelection: (opts: {
+    label: string;
+    regionId: string;
+    customerIds: string[];
+    strategy?: 'RETAIN' | 'DEFEND' | 'DEVELOP' | 'ACQUIRE';
+    suggestedChannel?: CampaignChannel;
+    objective?: string;
+  }) => void;
   openPredictionExplanation: (predictionId: string) => void;
   openCustomerPredictions: (customerId: string) => void;
   openNbaForCustomer: (customerId: string) => void;
@@ -512,6 +521,7 @@ interface PlatformContextValue {
   ) => void;
   resetDemoData: () => void;
   setAiPanelOpen: (open: boolean) => void;
+  setMapFullscreen: (fs: boolean) => void;
   openCustomer360: (customerId: string | null) => void;
   showToast: (msg: string) => void;
 
@@ -592,6 +602,7 @@ function formatNowStamp(): string {
 export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<PersistedPlatformState>(() => loadPersistedState());
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
+  const [mapFullscreen, setMapFullscreen] = useState(false);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(null);
   const [selectedPredictionId, setSelectedPredictionId] = useState<string | null>(null);
   const [selectedCampaignId, setSelectedCampaignId] = useState<string | null>(null);
@@ -603,6 +614,12 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     villageId: 'ALL',
   });
   const [customerRiskFilter, setCustomerRiskFilter] = useState<'ALL' | RiskCategory>('ALL');
+
+  useEffect(() => {
+    if (state.activeRoute !== 'location') {
+      setMapFullscreen(false);
+    }
+  }, [state.activeRoute]);
 
   useEffect(() => {
     try {
@@ -2235,6 +2252,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
         respectConsent: draft.respectConsent,
         respectSuppression: draft.respectSuppression,
         includeControlGroup: draft.includeControlGroup,
+        geoCustomerIds: draft.geoCustomerIds,
       });
 
       if (submitImmediately && audience.eligibleReachableCount === 0) {
@@ -3022,10 +3040,62 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
           Math.round((rec.estimatedRevenueImpact * 0.25) / 500_000) * 500_000
         ),
         linkedRecommendationId: rec.id,
+        geoCustomerIds: undefined,
+        geoSelectionLabel: undefined,
       });
       navigateToRoute('campaign_studio');
     },
     [activeTenant, scopedCustomers, updateWizardDraft, navigateToRoute]
+  );
+
+  const openCampaignStudioFromGeoSelection = useCallback(
+    (opts: {
+      label: string;
+      regionId: string;
+      customerIds: string[];
+      strategy?: 'RETAIN' | 'DEFEND' | 'DEVELOP' | 'ACQUIRE';
+      suggestedChannel?: CampaignChannel;
+      objective?: string;
+    }) => {
+      const strategy = opts.strategy ?? 'RETAIN';
+      const channel: CampaignChannel = opts.suggestedChannel ?? 'WhatsApp';
+      const regionName =
+        opts.regionId === 'ALL'
+          ? activeTenant.primaryProvinceName
+          : activeTenant.province.regencies.find((r) => r.id === opts.regionId)?.name ??
+            activeTenant.primaryProvinceName;
+
+      updateWizardDraft({
+        editingCampaignId: undefined,
+        step: 3,
+        name: `Geo-Targeted ${strategy}: ${opts.label}`,
+        objective:
+          opts.objective ??
+          `Activate ${opts.customerIds.length} geographically selected ${activeIndustry.terminology.customerPlural.toLowerCase()} in ${regionName} from Location Intelligence spatial boundary.`,
+        strategy,
+        businessUnitId: 'ALL',
+        regionId: opts.regionId,
+        targetSegment: 'ALL',
+        minRiskCategory: 'ALL',
+        minPropensityScore: 0,
+        channels: [channel],
+        messageSubject: `${activeTenant.shortName} Local Area Priority Offer — ${regionName}`,
+        messageBody: `Tailored local outreach for selected catchment (${opts.label}) in ${regionName}. Simulated campaign delivery subject to approval & consent verification.`,
+        scheduledDate: '2026-12-12',
+        budgetAllocated: Math.max(15_000_000, Math.round((opts.customerIds.length * 180_000) / 500_000) * 500_000),
+        linkedRecommendationId: undefined,
+        geoCustomerIds: opts.customerIds,
+        geoSelectionLabel: opts.label,
+      });
+      logAuditEvent(
+        'Campaign',
+        `Transferred geographic selection "${opts.label}" to Campaign Studio`,
+        `${opts.customerIds.length} selected customer(s) in ${regionName} passed to audience verification.`,
+        opts.regionId
+      );
+      navigateToRoute('campaign_studio');
+    },
+    [activeTenant, activeIndustry, updateWizardDraft, logAuditEvent, navigateToRoute]
   );
 
   const openPredictionExplanation = useCallback(
@@ -3158,6 +3228,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     permittedBranchIds,
     analytics,
     aiPanelOpen,
+    mapFullscreen,
     selectedCustomerId,
     selectedPredictionId,
     selectedCampaignId,
@@ -3203,6 +3274,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     approveModelRetraining,
     openCampaignComposerFromAction,
     openCampaignStudioFromRecommendation,
+    openCampaignStudioFromGeoSelection,
     openPredictionExplanation,
     openCustomerPredictions,
     openNbaForCustomer,
@@ -3211,6 +3283,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     logAuditEvent,
     resetDemoData,
     setAiPanelOpen,
+    setMapFullscreen,
     openCustomer360,
     showToast,
     updateOnboardingDraft,

@@ -130,7 +130,7 @@ test('all 6 demonstration tenants have isolated datasets, industry profiles, and
   assert.equal(DEMO_TENANTS.length, 6);
   assert.deepEqual(
     DEMO_TENANTS.map((t) => t.name),
-    ['Astra Motor', 'Auto2000', 'Daihatsu', 'Bank Saqu', 'Astralife', 'Autopart']
+    ['Astra Motor', 'Auto2000', 'Daihatsu', 'Lexus', 'BMW', 'Isuzu']
   );
 
   // Astra Motor must be the default tenant

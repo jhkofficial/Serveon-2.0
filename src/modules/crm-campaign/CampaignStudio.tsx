@@ -91,6 +91,7 @@ export function CampaignStudio() {
         respectConsent: wizardDraft.respectConsent,
         respectSuppression: wizardDraft.respectSuppression,
         includeControlGroup: wizardDraft.includeControlGroup,
+        geoCustomerIds: wizardDraft.geoCustomerIds,
       }),
     [scopedCustomers, activeTenant.id, wizardDraft]
   );
@@ -237,6 +238,32 @@ export function CampaignStudio() {
           execution. No real WhatsApp, SMS, or email communications are ever transmitted.
         </div>
       </div>
+
+      {wizardDraft.geoCustomerIds && wizardDraft.geoCustomerIds.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#16A6BD]/40 bg-[#F0FAFC] px-4 py-3 text-xs text-[#102B4D]">
+          <div>
+            <span className="font-semibold">Geographic Map Selection Active:</span>{' '}
+            <span>
+              {wizardDraft.geoSelectionLabel || 'Selected Map Area'} —{' '}
+              <strong className="font-mono">{wizardDraft.geoCustomerIds.length}</strong> map-selected
+              accounts narrowed to{' '}
+              <strong className="font-mono text-[#15946A]">
+                {liveAudience.eligibleReachableCount}
+              </strong>{' '}
+              consent-verified reachable accounts.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              updateWizardDraft({ geoCustomerIds: undefined, geoSelectionLabel: undefined })
+            }
+            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+          >
+            Clear Map Boundary Filter
+          </button>
+        </div>
+      )}
 
       {viewMode === 'wizard' && (
         <div className="space-y-5">

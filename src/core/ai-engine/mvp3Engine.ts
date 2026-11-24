@@ -1313,6 +1313,7 @@ export interface AudienceSelectionCriteria {
   respectConsent: boolean;
   respectSuppression: boolean;
   includeControlGroup: boolean;
+  geoCustomerIds?: string[];
 }
 
 /** Deduplicated audience calculator with consent, opt-out, suppression, and control-group holdout */
@@ -1320,8 +1321,14 @@ export function computeCampaignAudience(
   customers: CustomerRecord[],
   criteria: AudienceSelectionCriteria
 ): CampaignAudience {
+  const geoSet =
+    criteria.geoCustomerIds && criteria.geoCustomerIds.length > 0
+      ? new Set(criteria.geoCustomerIds)
+      : null;
+
   const matched = customers.filter((c) => {
     if (c.tenant_id !== criteria.tenantId) return false;
+    if (geoSet && !geoSet.has(c.customer_id)) return false;
     if (criteria.businessUnitId !== 'ALL' && c.business_unit_id !== criteria.businessUnitId) {
       return false;
     }
