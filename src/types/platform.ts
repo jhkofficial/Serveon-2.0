@@ -35,6 +35,7 @@ export type PermissionKey =
   | 'customers.view'
   | 'customers.view_detail'
   | 'location.view'
+  | 'location.view_precise_customer'
   | 'predictive.view'
   | 'campaigns.view'
   | 'campaigns.create'

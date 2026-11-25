@@ -1,10 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
   Building2,
-  Compass,
+  Check,
+  CheckCircle2,
+  Copy,
   Crosshair,
+  Globe,
   Info,
   Lock,
   MapPin,
@@ -25,11 +28,15 @@ import type {
   IndustryGeoConfig,
   OpportunityGapZone,
   OpportunityWeights,
+  ReverseGeocodingResult,
 } from '../../types/geospatial';
+import type { ProvinceMapConfig } from '../../data/geo/indonesiaGeo';
 import {
   haversineDistanceKm,
+  isPlottableCustomer,
   MARKER_GROUP_META,
 } from '../../core/geo/geospatialService';
+import { runReverseGeocoding } from '../../core/geo/geoValidationEngine';
 import { formatIdrCompact, formatNumber } from '../../core/analytics/kpiEngine';
 
 export type ContextPanelTab =
@@ -43,8 +50,10 @@ export type ContextPanelTab =
 interface GeoContextPanelProps {
   activeTab: ContextPanelTab;
   onChangeTab: (tab: ContextPanelTab) => void;
+  tenantName: string;
   geoConfig: IndustryGeoConfig;
   provinceName: string;
+  provinceGeo: ProvinceMapConfig;
   activeTerritoryTitle: string;
   selectedRegionId: string;
   selectedDistrictId: string;
@@ -70,6 +79,7 @@ interface GeoContextPanelProps {
   canCreateCampaign: boolean;
   onSelectCustomer: (customerId: string) => void;
   onSelectDealer: (dealerId: string) => void;
+  onShowNearestDealer: (customer: GeocodedCustomer) => void;
   onSelectRegion: (regionId: string) => void;
   onOpenCustomer360: (customerId: string) => void;
   onOpenCustomerPrediction: (customerId: string) => void;
@@ -87,8 +97,10 @@ const DRIVE_TIME_PRESETS = [5, 10, 15, 30];
 export function GeoContextPanel({
   activeTab,
   onChangeTab,
+  tenantName,
   geoConfig,
   provinceName,
+  provinceGeo,
   activeTerritoryTitle,
   selectedRegionId,
   filteredCustomers,
@@ -112,6 +124,7 @@ export function GeoContextPanel({
   canCreateCampaign,
   onSelectCustomer,
   onSelectDealer,
+  onShowNearestDealer,
   onSelectRegion,
   onOpenCustomer360,
   onOpenCustomerPrediction,
@@ -126,6 +139,13 @@ export function GeoContextPanel({
   const [selectedDriveMin, setSelectedDriveMin] = useState<number>(15);
   const [customRadiusInput, setCustomRadiusInput] = useState<string>(String(coverageRadiusKm));
   const [showDealerAnalyticsDetail, setShowDealerAnalyticsDetail] = useState(false);
+  const [copiedCoords, setCopiedCoords] = useState(false);
+  const [reverseGeoResult, setReverseGeoResult] = useState<ReverseGeocodingResult | null>(null);
+
+  useEffect(() => {
+    setCopiedCoords(false);
+    setReverseGeoResult(null);
+  }, [selectedCustomer?.customer_id]);
 
   const territoryStats = useMemo(() => {
     const totalLtv = filteredCustomers.reduce((s, c) => s + c.lifetime_value, 0);
@@ -190,7 +210,8 @@ export function GeoContextPanel({
         )
       : null;
 
-    const within3km = filteredCustomers.filter(
+    const plottable = filteredCustomers.filter(isPlottableCustomer);
+    const within3km = plottable.filter(
       (c) =>
         haversineDistanceKm(
           selectedCompetitor.latitude,
@@ -199,7 +220,7 @@ export function GeoContextPanel({
           c.longitude
         ) <= 3
     );
-    const within5km = filteredCustomers.filter(
+    const within5km = plottable.filter(
       (c) =>
         haversineDistanceKm(
           selectedCompetitor.latitude,
@@ -407,6 +428,18 @@ export function GeoContextPanel({
               </div>
             </div>
 
+            {/* Cluster Display Positioning Safeguard Note */}
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-2.5 text-[10.5px] text-emerald-950">
+              <div className="flex items-center gap-1.5 font-semibold text-[#15946A]">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                Coastal-Safe Terrestrial Anchoring Active
+              </div>
+              <p className="mt-1 leading-snug text-slate-700">
+                Cluster markers anchor on the nearest valid on-land customer member (never offshore
+                over bays or seas) without altering individual customer coordinates.
+              </p>
+            </div>
+
             {/* Quick Inspect Accounts (RBAC-Gated) */}
             {canViewIndividualCustomers ? (
               <div>
@@ -427,11 +460,16 @@ export function GeoContextPanel({
                         <div className="font-mono text-[11.5px] font-semibold text-[#102B4D]">
                           {cust.pseudonym_code}{' '}
                           <span className="font-sans text-[10px] font-normal text-slate-500">
-                            · {cust.nearest_dealer_distance_km} km
+                            ·{' '}
+                            {cust.is_plottable
+                              ? `${cust.nearest_dealer_distance_km} km`
+                              : cust.geolocation_status === 'INVALID_LOCATION'
+                                ? 'Quarantined'
+                                : 'Unmapped'}
                           </span>
                         </div>
                         <div className="truncate text-[10.5px] text-slate-500">
-                          {cust.customer_segment} · Risk {cust.churn_risk}/100
+                          {cust.village_name}, {cust.district_name} · Risk {cust.churn_risk}/100
                         </div>
                       </button>
                       <button
@@ -449,29 +487,32 @@ export function GeoContextPanel({
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-900">
                 <div className="flex items-center gap-1.5 font-semibold">
                   <Lock className="h-3.5 w-3.5" />
-                  Customer-Level Privacy Mask Active
+                  Customer-Level Location Privacy Active
                 </div>
                 <p className="mt-1 leading-snug">
                   Your current role sees aggregated territory clusters, heatmaps, and opportunity
-                  summaries only. Individual customer records require <code>customers.view</code>.
+                  summaries only. Precise residential coordinates require{' '}
+                  <code>location.view_precise_customer</code> (Platform Super Admin and Executive
+                  Management are aggregated by default).
                 </p>
               </div>
             )}
           </div>
         )}
 
-        {/* 2. CUSTOMER DETAIL PANEL (RBAC-PROTECTED, PSEUDONYMOUS) */}
+        {/* 2. INDIVIDUAL CUSTOMER LOCATION DETAIL PANEL (RBAC-PROTECTED) */}
         {activeTab === 'customer' && (
-          <div className="space-y-4">
+          <div data-testid="customer-location-detail" className="space-y-3.5">
             {!canViewIndividualCustomers ? (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
                 <div className="flex items-center gap-2 font-semibold">
                   <Lock className="h-4 w-4 shrink-0" />
-                  Restricted: Aggregated Access Only
+                  Restricted: Aggregated Location Access Only
                 </div>
                 <p className="mt-1.5 text-[11.5px] leading-relaxed">
-                  Individual customer spatial coordinates and profiles are masked for your current
-                  role to enforce enterprise privacy governance. Use Territory Analytics, Clusters,
+                  Precise customer coordinates and address provenance are restricted for your
+                  current role under SERVEON geolocation privacy governance (requires{' '}
+                  <code>location.view_precise_customer</code>). Use Territory Analytics, Clusters,
                   or Heatmaps instead.
                 </p>
               </div>
@@ -480,8 +521,8 @@ export function GeoContextPanel({
                 <MapPin className="mx-auto h-6 w-6 text-slate-400" />
                 <p className="mt-2 font-medium text-slate-700">No Customer Point Selected</p>
                 <p className="mt-1 text-[11px]">
-                  Zoom to level 12+ and click any color-coded customer marker on the map, or select
-                  a priority account from the Territory tab.
+                  Zoom to level 12+ and click any color-coded customer marker on the map, search by
+                  Customer ID / District / Village, or pick an account from Territory Details.
                 </p>
                 {filteredCustomers.length > 0 && (
                   <button
@@ -490,145 +531,413 @@ export function GeoContextPanel({
                       const outsideAtRisk =
                         filteredCustomers.find(
                           (c) =>
+                            c.is_plottable &&
                             c.marker_group === 'at_risk' &&
                             c.nearest_dealer_distance_km > coverageRadiusKm
-                        ) ?? filteredCustomers[0];
+                        ) ??
+                        filteredCustomers.find((c) => c.is_plottable) ??
+                        filteredCustomers[0];
                       onSelectCustomer(outsideAtRisk.customer_id);
                     }}
                     className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-[#1769AA] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#102B4D]"
                   >
-                    Inspect Sample At-Risk {geoConfig.customerLabel}
+                    Inspect Validated Sample {geoConfig.customerLabel}
                   </button>
                 )}
               </div>
             ) : (
               <>
-                <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <span className="text-[10.5px] font-semibold text-[#1769AA]">
-                      Pseudonymous {geoConfig.customerLabel} Profile
-                    </span>
-                    <h3 className="mt-0.5 font-mono text-base font-bold text-[#102B4D]">
-                      {selectedCustomer.pseudonym_code}
-                    </h3>
-                    <div className="mt-0.5 text-[11px] text-slate-500">
-                      {selectedCustomer.customer_segment} · {selectedCustomer.lifecycle_stage}
+                {/* CUSTOMER INFORMATION */}
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#1769AA]">
+                        Customer Information
+                      </span>
+                      <h3 className="mt-0.5 font-mono text-base font-bold text-[#102B4D]">
+                        {selectedCustomer.pseudonym_code}
+                      </h3>
+                      <div className="font-mono text-[10px] text-slate-500">
+                        ID: {selectedCustomer.customer_id}
+                      </div>
                     </div>
+                    <span
+                      className="shrink-0 rounded px-2 py-0.5 text-[10.5px] font-semibold text-white"
+                      style={{
+                        backgroundColor: MARKER_GROUP_META[selectedCustomer.marker_group].color,
+                      }}
+                    >
+                      {MARKER_GROUP_META[selectedCustomer.marker_group].shortLabel}
+                    </span>
                   </div>
-                  <span
-                    className="rounded px-2 py-0.5 text-[10.5px] font-semibold text-white"
-                    style={{
-                      backgroundColor: MARKER_GROUP_META[selectedCustomer.marker_group].color,
-                    }}
-                  >
-                    {MARKER_GROUP_META[selectedCustomer.marker_group].shortLabel}
-                  </span>
+                  <dl className="mt-2.5 grid grid-cols-2 gap-x-2 gap-y-1.5 border-t border-slate-200 pt-2 text-[11px]">
+                    <div>
+                      <dt className="text-[10px] text-slate-500">Tenant</dt>
+                      <dd className="font-semibold text-slate-900">{tenantName}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[10px] text-slate-500">Segment</dt>
+                      <dd className="font-semibold text-slate-900">
+                        {selectedCustomer.customer_segment}
+                      </dd>
+                    </div>
+                    <div className="col-span-2">
+                      <dt className="text-[10px] text-slate-500">
+                        Assigned {geoConfig.dealerLabel}
+                      </dt>
+                      <dd className="font-medium text-slate-900">
+                        {selectedCustomer.assigned_dealer_name}
+                      </dd>
+                    </div>
+                  </dl>
                 </div>
 
-                {/* AI Risk & Opportunity Indicators */}
-                <div className="grid grid-cols-2 gap-2.5 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <div>
-                    <div className="text-[10.5px] text-slate-500">AI Churn Risk (Sim)</div>
+                {/* Validation Quarantine / Unmapped Warning if not plottable */}
+                {!selectedCustomer.is_plottable && (
+                  <div
+                    data-testid="customer-location-unavailable-banner"
+                    className="rounded-lg border border-red-200 bg-red-50 p-3 text-[11px] text-red-900"
+                  >
+                    <div className="flex items-center gap-1.5 font-semibold">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-red-600" />
+                      Location Not Available for Map Display
+                    </div>
+                    <p className="mt-1 leading-snug">
+                      {selectedCustomer.validation_issue ??
+                        'This customer record is quarantined or not geocoded and is excluded from map markers.'}
+                    </p>
+                  </div>
+                )}
+
+                {/* GEOGRAPHIC INFORMATION */}
+                <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#102B4D]">
+                      Geographic Information (EPSG:4326)
+                    </span>
+                    <button
+                      type="button"
+                      disabled={
+                        selectedCustomer.latitude === null || selectedCustomer.longitude === null
+                      }
+                      onClick={() => {
+                        if (
+                          selectedCustomer.latitude === null ||
+                          selectedCustomer.longitude === null
+                        ) {
+                          return;
+                        }
+                        const txt = `${selectedCustomer.latitude.toFixed(5)}, ${selectedCustomer.longitude.toFixed(5)}`;
+                        if (typeof navigator !== 'undefined' && navigator.clipboard) {
+                          navigator.clipboard.writeText(txt).catch(() => {});
+                        }
+                        setCopiedCoords(true);
+                        window.setTimeout(() => setCopiedCoords(false), 1800);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[10.5px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      {copiedCoords ? (
+                        <>
+                          <Check className="h-3 w-3 text-[#15946A]" />
+                          Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-3 w-3" />
+                          Copy Coords
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 rounded bg-slate-50 p-2 font-mono text-[11px]">
+                    <div>
+                      <div className="font-sans text-[10px] text-slate-500">Latitude</div>
+                      <div
+                        data-testid="customer-detail-lat"
+                        className="font-bold text-[#102B4D] tabular-nums"
+                      >
+                        {selectedCustomer.latitude !== null
+                          ? selectedCustomer.latitude.toFixed(5)
+                          : 'Location Not Available'}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="font-sans text-[10px] text-slate-500">Longitude</div>
+                      <div
+                        data-testid="customer-detail-lng"
+                        className="font-bold text-[#102B4D] tabular-nums"
+                      >
+                        {selectedCustomer.longitude !== null
+                          ? selectedCustomer.longitude.toFixed(5)
+                          : 'Location Not Available'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1 text-[11px]">
+                    <div>
+                      <span className="text-[10px] text-slate-500">Address Line (Provenance):</span>
+                      <div
+                        data-testid="customer-detail-address"
+                        className="font-medium text-slate-900"
+                      >
+                        {selectedCustomer.address_line}
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1 pt-1">
+                      <div>
+                        <span className="text-[10px] text-slate-500">Village (Kelurahan):</span>
+                        <div className="font-medium text-slate-800">
+                          {selectedCustomer.village_name}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500">District (Kecamatan):</span>
+                        <div className="font-medium text-slate-800">
+                          {selectedCustomer.district_name}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500">City / Regency:</span>
+                        <div className="font-medium text-slate-800">
+                          {selectedCustomer.city_name}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="text-[10px] text-slate-500">Province / Postal:</span>
+                        <div className="font-medium text-slate-800">
+                          {selectedCustomer.province_name} ({selectedCustomer.postal_code})
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Reverse Geocode / Inspect Trigger */}
+                  <button
+                    type="button"
+                    data-testid="btn-customer-reverse-geocode"
+                    disabled={
+                      selectedCustomer.latitude === null || selectedCustomer.longitude === null
+                    }
+                    onClick={() => {
+                      if (
+                        selectedCustomer.latitude === null ||
+                        selectedCustomer.longitude === null
+                      ) {
+                        return;
+                      }
+                      const res = runReverseGeocoding(
+                        selectedCustomer.latitude,
+                        selectedCustomer.longitude,
+                        provinceGeo
+                      );
+                      setReverseGeoResult(res);
+                    }}
+                    className="inline-flex h-7 w-full items-center justify-center gap-1.5 rounded border border-[#16A6BD] bg-[#F0FAFC] px-2 text-[11px] font-semibold text-[#102B4D] hover:bg-[#E0F5F9] disabled:cursor-not-allowed disabled:opacity-45"
+                  >
+                    <Globe className="h-3.5 w-3.5 text-[#16A6BD]" />
+                    Reverse Geocode / Verify Location Details
+                  </button>
+
+                  {reverseGeoResult && (
                     <div
-                      className={`mt-0.5 font-mono text-base font-bold ${
-                        selectedCustomer.churn_risk_category === 'High'
-                          ? 'text-[#D9534F]'
-                          : selectedCustomer.churn_risk_category === 'Medium'
-                            ? 'text-amber-700'
-                            : 'text-[#15946A]'
+                      data-testid="customer-reverse-geocode-result"
+                      className="rounded-lg border border-amber-200 bg-amber-50/70 p-2.5 text-[10.5px]"
+                    >
+                      <div className="flex items-center justify-between gap-1 font-semibold text-amber-900">
+                        <span>{reverseGeoResult.statusMessage}</span>
+                        <span className="font-mono text-[9.5px] text-slate-600">
+                          {reverseGeoResult.cached ? 'Cached' : 'Fresh'}
+                        </span>
+                      </div>
+                      <div className="mt-1 text-slate-800">
+                        {reverseGeoResult.approximateAddress}
+                      </div>
+                      <div className="mt-1 font-mono text-[10px] text-slate-700">
+                        Land: <strong>{reverseGeoResult.landStatus}</strong> · Territory:{' '}
+                        <strong>{reverseGeoResult.city}</strong>
+                      </div>
+                      <p className="mt-1 text-[10px] leading-snug text-slate-600">
+                        {reverseGeoResult.caveat}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* GEOLOCATION QUALITY */}
+                <div className="space-y-2 rounded-lg border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#102B4D]">
+                      Geolocation Quality
+                    </span>
+                    <span
+                      data-testid="customer-detail-geo-status"
+                      className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                        selectedCustomer.is_plottable
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : selectedCustomer.geolocation_status === 'INVALID_LOCATION'
+                            ? 'bg-red-100 text-red-800'
+                            : 'bg-amber-100 text-amber-800'
                       }`}
                     >
-                      {selectedCustomer.churn_risk} / 100
+                      {selectedCustomer.geolocation_status}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-1.5 text-center font-mono text-[10px]">
+                    <div className="rounded border border-slate-200 bg-slate-50 px-1 py-1">
+                      <div className="font-sans text-[9.5px] text-slate-500">Coord</div>
+                      <div
+                        className={
+                          selectedCustomer.coordinate_validation_status === 'VALID'
+                            ? 'font-bold text-[#15946A]'
+                            : 'font-bold text-red-700'
+                        }
+                      >
+                        {selectedCustomer.coordinate_validation_status}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-1 py-1">
+                      <div className="font-sans text-[9.5px] text-slate-500">Land Mask</div>
+                      <div
+                        className={
+                          selectedCustomer.land_validation_status === 'ON_LAND'
+                            ? 'font-bold text-[#15946A]'
+                            : 'font-bold text-red-700'
+                        }
+                      >
+                        {selectedCustomer.land_validation_status}
+                      </div>
+                    </div>
+                    <div className="rounded border border-slate-200 bg-slate-50 px-1 py-1">
+                      <div className="font-sans text-[9.5px] text-slate-500">Territory</div>
+                      <div
+                        className={
+                          selectedCustomer.territory_validation_status === 'INSIDE_TERRITORY'
+                            ? 'font-bold text-[#15946A]'
+                            : 'font-bold text-red-700'
+                        }
+                      >
+                        {selectedCustomer.territory_validation_status}
+                      </div>
                     </div>
                   </div>
-                  <div>
-                    <div className="text-[10.5px] text-slate-500">Purchase Propensity</div>
-                    <div className="mt-0.5 font-mono text-base font-bold text-[#1769AA]">
-                      {selectedCustomer.purchase_propensity} / 100
+
+                  <div className="space-y-1 text-[10.5px]">
+                    <div className="flex justify-between gap-2">
+                      <span className="text-slate-500">Source:</span>
+                      <span className="text-right font-medium text-slate-800">
+                        {selectedCustomer.geolocation_source}
+                      </span>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-[10.5px] text-slate-500">Lifetime Value</div>
-                    <div className="mt-0.5 font-mono text-sm font-semibold text-slate-900">
-                      {formatIdrCompact(selectedCustomer.lifetime_value)}
+                    <div className="flex justify-between gap-2">
+                      <span className="text-slate-500">Method:</span>
+                      <span className="text-right text-slate-700">
+                        {selectedCustomer.geolocation_method}
+                      </span>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-[10.5px] text-slate-500">Primary Holding</div>
-                    <div className="mt-0.5 truncate text-[11px] font-semibold text-slate-800">
-                      {selectedCustomer.product_primary}
+                    <div className="flex justify-between gap-2">
+                      <span className="text-slate-500">Accuracy / Confidence:</span>
+                      <span className="text-right font-mono font-semibold text-slate-800">
+                        {selectedCustomer.geolocation_confidence}% ({selectedCustomer.geolocation_accuracy})
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-slate-500">Last Verified:</span>
+                      <span className="font-mono text-slate-700">
+                        {selectedCustomer.last_verified_at}
+                      </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Customer-to-Dealer Spatial Relationship */}
+                {/* BUSINESS INTELLIGENCE */}
                 <div className="space-y-2 rounded-lg border border-slate-200 p-3">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-[#102B4D]">
-                      {geoConfig.customerLabel}-to-{geoConfig.dealerLabel} Intelligence
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-[#102B4D]">
+                      Business Intelligence
                     </span>
                     <span
                       className={`text-[10px] font-semibold ${
-                        selectedCustomer.nearest_dealer_distance_km <= coverageRadiusKm
-                          ? 'text-[#15946A]'
-                          : 'text-[#D9534F]'
+                        !selectedCustomer.is_plottable
+                          ? 'text-slate-500'
+                          : selectedCustomer.nearest_dealer_distance_km <= coverageRadiusKm
+                            ? 'text-[#15946A]'
+                            : 'text-[#D9534F]'
                       }`}
                     >
-                      {selectedCustomer.nearest_dealer_distance_km <= coverageRadiusKm
-                        ? `Inside ${coverageRadiusKm} km`
-                        : `Outside ${coverageRadiusKm} km`}
+                      {!selectedCustomer.is_plottable
+                        ? 'Coverage Unavailable'
+                        : selectedCustomer.nearest_dealer_distance_km <= coverageRadiusKm
+                          ? `Inside ${coverageRadiusKm} km`
+                          : `Outside ${coverageRadiusKm} km`}
                     </span>
                   </div>
 
-                  <div className="space-y-1.5 text-[11px]">
-                    <div className="flex justify-between gap-2">
-                      <span className="text-slate-500">Assigned {geoConfig.dealerLabel}:</span>
-                      <span className="text-right font-medium text-slate-900">
-                        {selectedCustomer.assigned_dealer_name} (
-                        <span className="font-mono">
-                          {selectedCustomer.assigned_dealer_distance_km} km
-                        </span>
-                        )
-                      </span>
+                  <div className="grid grid-cols-3 gap-2 rounded bg-slate-50 p-2 text-center">
+                    <div>
+                      <div className="text-[10px] text-slate-500">Churn Risk</div>
+                      <div
+                        className={`font-mono text-sm font-bold ${
+                          selectedCustomer.churn_risk_category === 'High'
+                            ? 'text-[#D9534F]'
+                            : selectedCustomer.churn_risk_category === 'Medium'
+                              ? 'text-amber-700'
+                              : 'text-[#15946A]'
+                        }`}
+                      >
+                        {selectedCustomer.churn_risk}/100
+                      </div>
                     </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500">Propensity</div>
+                      <div className="font-mono text-sm font-bold text-[#1769AA]">
+                        {selectedCustomer.purchase_propensity}/100
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500">LTV</div>
+                      <div className="font-mono text-xs font-bold text-slate-900">
+                        {formatIdrCompact(selectedCustomer.lifetime_value)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1 text-[11px]">
                     <div className="flex justify-between gap-2">
-                      <span className="text-slate-500">Nearest Available:</span>
+                      <span className="text-slate-500">Nearest {geoConfig.dealerLabel}:</span>
                       <span className="text-right font-medium text-[#15946A]">
-                        {selectedCustomer.nearest_dealer_name} (
-                        <span className="font-mono">
-                          {selectedCustomer.nearest_dealer_distance_km} km
-                        </span>
-                        )
+                        {selectedCustomer.nearest_dealer_name}
+                        {selectedCustomer.is_plottable
+                          ? ` (${selectedCustomer.nearest_dealer_distance_km} km)`
+                          : ' (Dist N/A)'}
                       </span>
                     </div>
                     <div className="flex justify-between gap-2">
-                      <span className="text-slate-500">Latest Interaction:</span>
-                      <span className="text-right text-slate-800">
-                        {selectedCustomer.latest_interaction_summary}
+                      <span className="text-slate-500">Primary Holding:</span>
+                      <span className="text-right font-medium text-slate-800">
+                        {selectedCustomer.product_primary}
                       </span>
                     </div>
                     <div className="flex justify-between gap-2">
                       <span className="text-slate-500">Travel Time Estimate:</span>
                       <span className="text-right text-slate-500 italic">
-                        Unavailable (Routing API not configured)
+                        Unavailable (Routing API not connected)
                       </span>
                     </div>
                   </div>
 
-                  <label className="mt-2 flex items-center gap-2 rounded bg-[#F0F7FC] p-2 text-[11px] font-medium text-[#102B4D]">
+                  <label className="mt-1 flex items-center gap-2 rounded bg-[#F0F7FC] p-2 text-[11px] font-medium text-[#102B4D]">
                     <input
                       type="checkbox"
-                      checked={showCustomerToDealerLine}
+                      disabled={!selectedCustomer.is_plottable}
+                      checked={showCustomerToDealerLine && selectedCustomer.is_plottable}
                       onChange={(e) => onToggleCustomerToDealerLine(e.target.checked)}
-                      className="rounded border-slate-300 text-[#1769AA]"
+                      className="rounded border-slate-300 text-[#1769AA] disabled:opacity-45"
                     />
-                    <span>Show Customer-to-Dealer Connection</span>
+                    <span>Show Straight-Line Customer-to-Dealer Line</span>
                   </label>
-                  <p className="text-[10px] leading-snug text-slate-500">
-                    Straight-line geographic relationship (Haversine WGS-84) — not a road route.
-                    Synthetic demo coordinate ({selectedCustomer.latitude.toFixed(4)},{' '}
-                    {selectedCustomer.longitude.toFixed(4)}).
-                  </p>
                 </div>
 
                 {/* Primary Actions */}
@@ -641,14 +950,25 @@ export function GeoContextPanel({
                     <Users className="h-3.5 w-3.5" />
                     View Customer 360
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => onOpenCustomerPrediction(selectedCustomer.customer_id)}
-                    className="inline-flex h-8 w-full items-center justify-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-[11.5px] font-semibold text-slate-700 hover:bg-slate-50"
-                  >
-                    <Sparkles className="h-3.5 w-3.5 text-[#16A6BD]" />
-                    Inspect AI Risk Drivers
-                  </button>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      disabled={!selectedCustomer.is_plottable}
+                      onClick={() => onShowNearestDealer(selectedCustomer)}
+                      className="inline-flex h-8 items-center justify-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-2 text-[11px] font-semibold text-emerald-900 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-45"
+                    >
+                      <Navigation className="h-3 w-3 text-[#15946A]" />
+                      Show Nearest Dealer
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenCustomerPrediction(selectedCustomer.customer_id)}
+                      className="inline-flex h-8 items-center justify-center gap-1 rounded-lg border border-slate-300 bg-white px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      <Sparkles className="h-3 w-3 text-[#16A6BD]" />
+                      AI Risk Drivers
+                    </button>
+                  </div>
                 </div>
               </>
             )}

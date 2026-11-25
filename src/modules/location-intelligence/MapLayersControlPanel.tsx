@@ -668,6 +668,30 @@ export function MapLayersControlPanel({
               </select>
             </div>
 
+            <div>
+              <label htmlFor="flt-geo-status" className="block text-[11px] font-medium text-slate-600">
+                Geolocation Quality Status
+              </label>
+              <select
+                id="flt-geo-status"
+                value={filters.geolocationStatus}
+                onChange={(e) =>
+                  onUpdateFilters({
+                    geolocationStatus: e.target.value as GeoFilterState['geolocationStatus'],
+                  })
+                }
+                className="mt-1 h-8 w-full rounded-lg border border-slate-300 bg-white px-2 text-[11px] text-slate-800"
+              >
+                <option value="ALL">All Geolocation Statuses</option>
+                <option value="SIMULATED_VALID_LAND_POINT">Simulated Valid Land Point</option>
+                <option value="VERIFIED_ADDRESS">Verified Address</option>
+                <option value="VERIFIED_POINT">Verified Point</option>
+                <option value="APPROXIMATE_LOCATION">Approximate Location</option>
+                <option value="INVALID_LOCATION">Invalid Location (Quarantined)</option>
+                <option value="NOT_GEOCODED">Not Geocoded (Unmapped)</option>
+              </select>
+            </div>
+
             <label className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-[11px] font-medium text-amber-900">
               <input
                 type="checkbox"

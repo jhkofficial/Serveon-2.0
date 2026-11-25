@@ -20,6 +20,7 @@ import {
   computeCustomerMapCounts,
   computeZoomClusters,
   haversineDistanceKm,
+  isPlottableCustomer,
   MARKER_GROUP_META,
 } from '../../core/geo/geospatialService';
 import { formatIdrCompact, formatNumber } from '../../core/analytics/kpiEngine';
@@ -348,6 +349,10 @@ export function AdvancedLeafletMap({
   const draftGroupRef = useRef<L.LayerGroup | null>(null);
 
   const provinceGeo = useMemo(() => getProvinceMapConfig(tenant), [tenant]);
+  const plottableCustomers = useMemo(
+    () => customers.filter(isPlottableCustomer),
+    [customers]
+  );
   const [currentZoom, setCurrentZoom] = useState<number>(provinceGeo.defaultZoom);
   const [viewportBounds, setViewportBounds] = useState<GeoViewportBounds | null>(null);
   const [legendExpanded, setLegendExpanded] = useState(false);
@@ -542,11 +547,11 @@ export function AdvancedLeafletMap({
   // Fit to selected filtered customer results when requested
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || fitCustomersSignal === 0 || customers.length === 0) return;
-    const latLngs = customers.map((c) => [c.latitude, c.longitude] as [number, number]);
+    if (!map || fitCustomersSignal === 0 || plottableCustomers.length === 0) return;
+    const latLngs = plottableCustomers.map((c) => [c.latitude, c.longitude] as [number, number]);
     const bounds = L.latLngBounds(latLngs);
     map.fitBounds(bounds, { padding: [42, 42], maxZoom: 14, animate: false });
-  }, [fitCustomersSignal, customers]);
+  }, [fitCustomersSignal, plottableCustomers]);
 
   // Programmatic zoomTarget (e.g. from Guided Demo or Search result)
   useEffect(() => {
@@ -624,9 +629,9 @@ export function AdvancedLeafletMap({
       mapMode === 'heatmap_value' ||
       mapMode === 'heatmap_risk';
 
-    if (!isHeatmapMode || customers.length === 0) return;
+    if (!isHeatmapMode || plottableCustomers.length === 0) return;
 
-    const maxLtv = Math.max(1, ...customers.map((c) => c.lifetime_value));
+    const maxLtv = Math.max(1, ...plottableCustomers.map((c) => c.lifetime_value));
     const heatType =
       mapMode === 'heatmap_value'
         ? 'value'
@@ -635,7 +640,7 @@ export function AdvancedLeafletMap({
           : 'density';
 
     const points: HeatPoint[] = [];
-    for (const c of customers) {
+    for (const c of plottableCustomers) {
       if (heatType === 'risk') {
         if (c.churn_risk < 55 && c.marker_group !== 'at_risk') continue;
         points.push({
@@ -664,7 +669,7 @@ export function AdvancedLeafletMap({
         heatmapLayerRef.current = null;
       }
     };
-  }, [customers, mapMode, heatmapIntensity]);
+  }, [plottableCustomers, mapMode, heatmapIntensity]);
 
   // 4. Render Customer Clusters OR Individual Customer Markers (strict RBAC + Zoom reconciliation)
   const shouldRenderIndividualPoints = useMemo(() => {
@@ -679,19 +684,19 @@ export function AdvancedLeafletMap({
     if (mapMode === 'clusters') return false;
     if (mapMode === 'opportunity') return false;
     // Smart zoom threshold: individual customer markers appear at zoom >= 12 (or when <= 35 filtered points)
-    return currentZoom >= 12 || (layers.customerPoints && customers.length <= 35);
+    return currentZoom >= 12 || (layers.customerPoints && plottableCustomers.length <= 35);
   }, [
     canViewIndividualCustomers,
     mapMode,
     currentZoom,
     layers.customerPoints,
-    customers.length,
+    plottableCustomers.length,
   ]);
 
   const clusters = useMemo(() => {
     if (shouldRenderIndividualPoints) return [];
-    return computeZoomClusters(customers, currentZoom);
-  }, [customers, currentZoom, shouldRenderIndividualPoints]);
+    return computeZoomClusters(customers, currentZoom, provinceGeo);
+  }, [customers, currentZoom, provinceGeo, shouldRenderIndividualPoints]);
 
   useEffect(() => {
     const group = customerGroupRef.current;
@@ -709,8 +714,8 @@ export function AdvancedLeafletMap({
     if (!layers.customerPoints && !layers.customerClusters && mapMode !== 'clusters') return;
 
     if (shouldRenderIndividualPoints) {
-      // Individual pseudonymous customer markers (fast Canvas vector circles)
-      for (const c of customers) {
+      // Individual pseudonymous validated terrestrial customer markers (never plots invalid/offshore records)
+      for (const c of plottableCustomers) {
         const meta = MARKER_GROUP_META[c.marker_group];
         const isSelected = c.customer_id === selectedCustomerId;
         const isUncovered =
@@ -741,11 +746,12 @@ export function AdvancedLeafletMap({
         });
 
         marker.bindTooltip(
-          `<div style="font-family:Inter,sans-serif;font-size:11px;line-height:1.4;">
+          `<div style="font-family:Inter,sans-serif;font-size:11px;line-height:1.45;">
             <div style="font-weight:700;color:#102B4D;">${c.pseudonym_code} <span style="font-weight:500;color:${meta.color};">(${meta.shortLabel})</span></div>
-            <div>${c.customer_segment} · Risk: <strong>${c.churn_risk}/100</strong></div>
+            <div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#0F172A;">${c.latitude.toFixed(5)}, ${c.longitude.toFixed(5)} (EPSG:4326)</div>
+            <div>${c.village_name}, ${c.district_name} · ${c.city_name}</div>
             <div>Nearest: ${c.nearest_dealer_name} (${c.nearest_dealer_distance_km} km straight-line)</div>
-            <div style="color:#64748B;font-size:10px;">Synthetic coordinate · Click for details</div>
+            <div style="color:#15946A;font-size:10px;">Validated Land Point · Simulated Point (Exact Address Unavailable)</div>
           </div>`,
           { direction: 'top', offset: [0, -6] }
         );
@@ -759,7 +765,7 @@ export function AdvancedLeafletMap({
         marker.addTo(group);
       }
     } else if (layers.customerClusters || mapMode === 'clusters' || !canViewIndividualCustomers) {
-      // Smart zoom-dependent cluster markers (never double-counted with individual markers)
+      // Smart zoom-dependent cluster markers anchored to valid on-land members (never offshore)
       for (const cl of clusters) {
         const marker = L.marker([cl.latitude, cl.longitude], {
           icon: createClusterIcon(cl, !canViewIndividualCustomers),
@@ -769,12 +775,14 @@ export function AdvancedLeafletMap({
         marker.bindTooltip(
           `<div style="font-family:Inter,sans-serif;font-size:11px;line-height:1.45;">
             <div style="font-weight:700;color:#102B4D;">${cl.label}</div>
-            <div>Aggregated ${geoConfig.customerPlural}: <strong>${formatNumber(cl.count)}</strong></div>
-            <div>At-Risk: <strong style="color:#D9534F;">${cl.atRiskCount}</strong> · Cumulative LTV: <strong>${formatIdrCompact(cl.totalLtv)}</strong></div>
+            <div>Validated ${geoConfig.customerPlural}: <strong>${formatNumber(cl.count)}</strong> · At-Risk: <strong style="color:#D9534F;">${cl.atRiskCount}</strong></div>
+            <div>Cumulative LTV: <strong>${formatIdrCompact(cl.totalLtv)}</strong></div>
+            <div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#0F172A;">Display Anchor (On-Land): ${cl.latitude.toFixed(4)}, ${cl.longitude.toFixed(4)}</div>
+            <div style="font-family:JetBrains Mono,monospace;font-size:10px;color:#64748B;">Math Centroid: ${cl.centroid_latitude.toFixed(4)}, ${cl.centroid_longitude.toFixed(4)}${cl.centroid_was_over_water ? ' (coastal-shifted)' : ''}</div>
             <div style="color:#64748B;font-size:10px;">${
               canViewIndividualCustomers
-                ? 'Click to zoom in and drill down'
-                : 'Aggregated view (RBAC privacy mode active)'
+                ? 'Click to zoom in and inspect individual coordinates'
+                : 'Aggregated view (RBAC location privacy active)'
             }</div>
           </div>`,
           { direction: 'top', offset: [0, -14] }
@@ -792,7 +800,7 @@ export function AdvancedLeafletMap({
       }
     }
   }, [
-    customers,
+    plottableCustomers,
     clusters,
     shouldRenderIndividualPoints,
     selectedCustomerId,
@@ -963,9 +971,9 @@ export function AdvancedLeafletMap({
     if (!group) return;
     group.clearLayers();
 
-    // Customer-to-Dealer straight-line relationship
+    // Customer-to-Dealer straight-line relationship (only for validated plottable customer)
     if (canViewIndividualCustomers && layers.customerToDealerLines && selectedCustomerId) {
-      const cust = customers.find((c) => c.customer_id === selectedCustomerId);
+      const cust = plottableCustomers.find((c) => c.customer_id === selectedCustomerId);
       if (cust) {
         const assigned = dealers.find((d) => d.dealer_id === cust.assigned_dealer_id);
         const nearest = dealers.find((d) => d.dealer_id === cust.nearest_dealer_id);
@@ -1034,7 +1042,7 @@ export function AdvancedLeafletMap({
     canViewIndividualCustomers,
     layers.customerToDealerLines,
     selectedCustomerId,
-    customers,
+    plottableCustomers,
     dealers,
     activeSelection,
     geoConfig.dealerLabel,
@@ -1136,8 +1144,8 @@ export function AdvancedLeafletMap({
         : mapMode === 'opportunity'
           ? 'Market Opportunity'
           : shouldRenderIndividualPoints
-            ? `Customer Points (${formatNumber(customers.length)})`
-            : `Clusters (${clusters.length} groups · ${formatNumber(customers.length)})`;
+            ? `Customer Points (${formatNumber(plottableCustomers.length)})`
+            : `Clusters (${clusters.length} groups · ${formatNumber(plottableCustomers.length)})`;
 
   return (
     <div
@@ -1154,6 +1162,9 @@ export function AdvancedLeafletMap({
         data-zoom={currentZoom}
         data-mode={mapMode}
         data-visible-customers={customers.length}
+        data-mapped-customers={mapCounts.mapped}
+        data-unmapped-customers={mapCounts.unmapped}
+        data-invalid-customers={mapCounts.invalid}
         data-viewport-visible={mapCounts.visible}
         data-cluster-count={clusters.length}
         data-individual-mode={shouldRenderIndividualPoints ? 'true' : 'false'}
@@ -1172,7 +1183,10 @@ export function AdvancedLeafletMap({
             {formatNumber(mapCounts.total)}
           </span>
         </div>
-        <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+        <div
+          className="flex items-center gap-1.5 px-2.5 py-1.5"
+          title="Validated on-land customer points safe to display on map"
+        >
           <span className="text-slate-500">Mapped</span>
           <span className="font-mono font-bold text-[#15946A] tabular-nums">
             {formatNumber(mapCounts.mapped)}
@@ -1184,7 +1198,10 @@ export function AdvancedLeafletMap({
             {formatNumber(mapCounts.visible)}
           </span>
         </div>
-        <div className="flex items-center gap-1.5 px-2.5 py-1.5">
+        <div
+          className="flex items-center gap-1.5 px-2.5 py-1.5"
+          title={`Quarantined Invalid Coordinates: ${mapCounts.invalid} · Not Geocoded: ${mapCounts.notGeocoded}`}
+        >
           <span className="text-slate-500">Unmapped</span>
           <span
             className={`font-mono font-bold tabular-nums ${
@@ -1215,11 +1232,17 @@ export function AdvancedLeafletMap({
           </button>
         </div>
 
-        {/* RBAC Privacy Notice when role cannot view individual customer points */}
+        {/* RBAC Privacy Notice when role cannot view precise customer coordinates */}
         {!canViewIndividualCustomers && (
-          <div className="pointer-events-auto flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50/95 px-2.5 py-1.5 text-[11px] font-medium text-amber-900 shadow-sm">
+          <div
+            data-testid="rbac-location-privacy-banner"
+            className="pointer-events-auto flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50/95 px-2.5 py-1.5 text-[11px] font-medium text-amber-900 shadow-sm"
+          >
             <Lock className="h-3.5 w-3.5 shrink-0 text-amber-700" />
-            <span>Aggregated Privacy Mode: Role restricted from individual customer points</span>
+            <span>
+              Aggregated Privacy Mode: Precise customer coordinates restricted (requires{' '}
+              <code>location.view_precise_customer</code>)
+            </span>
           </div>
         )}
       </div>

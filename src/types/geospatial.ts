@@ -17,6 +17,18 @@ export type MapDisplayMode =
   | 'competitor_analysis'
   | 'opportunity';
 
+export type GeolocationStatus =
+  | 'VERIFIED_ADDRESS'
+  | 'VERIFIED_POINT'
+  | 'APPROXIMATE_LOCATION'
+  | 'SIMULATED_VALID_LAND_POINT'
+  | 'INVALID_LOCATION'
+  | 'NOT_GEOCODED';
+
+export type CoordinateValidationStatus = 'VALID' | 'INVALID' | 'MISSING';
+export type LandValidationStatus = 'ON_LAND' | 'IN_SEA_OR_WATER' | 'UNAVAILABLE';
+export type TerritoryValidationStatus = 'INSIDE_TERRITORY' | 'OUTSIDE_TERRITORY' | 'UNAVAILABLE';
+
 export interface GeoViewportBounds {
   south: number;
   west: number;
@@ -29,6 +41,61 @@ export interface CustomerMapCounts {
   mapped: number;
   visible: number;
   unmapped: number;
+  invalid: number;
+  notGeocoded: number;
+}
+
+export interface GeolocationQualitySummary {
+  totalCustomers: number;
+  geocodedCustomers: number;
+  validatedLandPoints: number;
+  verifiedAddressPoints: number;
+  approximateLocations: number;
+  invalidCoordinates: number;
+  unmappedCustomers: number;
+  plottableCustomers: number;
+  offshoreRejectedCount: number;
+  outsideTerritoryRejectedCount: number;
+  lastValidatedAt: string;
+}
+
+export interface ForwardGeocodingRequest {
+  sourceAddress: string;
+  village: string;
+  district: string;
+  city: string;
+  province: string;
+  postalCode: string;
+}
+
+export interface ForwardGeocodingResult {
+  serviceConnected: boolean;
+  statusMessage: string;
+  providerName: string;
+  latitude: number | null;
+  longitude: number | null;
+  quality: GeolocationStatus;
+  matchedAddress: string;
+  confidence: number;
+  caveat: string;
+}
+
+export interface ReverseGeocodingResult {
+  serviceConnected: boolean;
+  statusMessage: string;
+  providerName: string;
+  latitude: number;
+  longitude: number;
+  approximateAddress: string;
+  village: string;
+  district: string;
+  city: string;
+  province: string;
+  postalCode: string;
+  landStatus: LandValidationStatus;
+  territoryStatus: TerritoryValidationStatus;
+  cached: boolean;
+  caveat: string;
 }
 
 export type CompetitorFilterMode = 'all' | 'dealer' | 'service' | 'none';
@@ -45,10 +112,46 @@ export interface GeocodedCustomer {
   customer_segment: CustomerRecord['customer_segment'];
   status: CustomerRecord['status'];
   lifecycle_stage: CustomerRecord['lifecycle_stage'];
-  latitude: number;
-  longitude: number;
-  location_accuracy: 'District-Anchored Synthetic' | 'Urban Corridor Synthetic';
-  location_source: 'Synthetic Demo Geocoder (Illustrative)';
+
+  /** Validated WGS-84 EPSG:4326 latitude (null when NOT_GEOCODED) */
+  latitude: number | null;
+  /** Validated WGS-84 EPSG:4326 longitude (null when NOT_GEOCODED) */
+  longitude: number | null;
+  /** Raw source coordinate retained for audit when quarantined as INVALID_LOCATION */
+  raw_source_latitude?: number | null;
+  raw_source_longitude?: number | null;
+
+  /** Structured address metadata — never fabricated as a real residential street address */
+  address_line: string;
+  village_name: string;
+  district_name: string;
+  city_name: string;
+  province_name: string;
+  postal_code: string;
+  reverse_geocoded_address: string | null;
+
+  /** Geolocation provenance & quality metadata */
+  geolocation_source: string;
+  geolocation_method: string;
+  geolocation_accuracy: string;
+  geolocation_confidence: number; // 0-100
+  geolocation_status: GeolocationStatus;
+
+  /** Explicit geospatial validation check outcomes */
+  coordinate_validation_status: CoordinateValidationStatus;
+  land_validation_status: LandValidationStatus;
+  territory_validation_status: TerritoryValidationStatus;
+  validation_issue: string | null;
+  /** True only when coordinate passed WGS-84 + Land Mask + Territory checks and is safe to plot */
+  is_plottable: boolean;
+
+  geocoded_at: string | null;
+  last_verified_at: string;
+
+  /** Legacy compatibility fields */
+  location_accuracy: string;
+  location_source: string;
+
   last_purchase_date: string;
   last_service_date: string;
   days_since_last_service: number;
@@ -117,8 +220,16 @@ export interface GeoClusterNode {
   id: string;
   label: string;
   regionId: string;
+  /** Guaranteed on-land cluster display position (never mutates customer coordinates) */
   latitude: number;
   longitude: number;
+  /** Raw mathematical centroid preserved for inspection & transparency */
+  centroid_latitude: number;
+  centroid_longitude: number;
+  display_method:
+    | 'On-Land Mathematical Centroid'
+    | 'Nearest Valid On-Land Member Anchor (Coastal-Safe)';
+  centroid_was_over_water: boolean;
   count: number;
   totalLtv: number;
   atRiskCount: number;
@@ -256,6 +367,7 @@ export interface GeoFilterState {
   productOwnership: string;
   assignedDealerId: string;
   onlyOutsideCoverage: boolean;
+  geolocationStatus: 'ALL' | GeolocationStatus;
 }
 
 export interface SavedMapView {

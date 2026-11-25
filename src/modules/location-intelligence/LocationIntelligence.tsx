@@ -17,6 +17,7 @@ import {
   RotateCcw,
   Ruler,
   Search,
+  ShieldCheck,
   Square,
   Target,
   Users,
@@ -24,6 +25,7 @@ import {
 import { usePlatform } from '../../core/state/PlatformContext';
 import { formatNumber } from '../../core/analytics/kpiEngine';
 import { hasPermission } from '../../core/permissions/rbac';
+import { getProvinceMapConfig } from '../../data/geo/indonesiaGeo';
 import {
   buildGeocodedCustomers,
   buildPresetSavedViews,
@@ -38,12 +40,20 @@ import {
   filterCompetitors,
   filterGeocodedCustomers,
   getIndustryGeoConfig,
+  isPlottableCustomer,
 } from '../../core/geo/geospatialService';
+import {
+  buildValidationReportCsv,
+  computeGeolocationQualitySummary,
+  validateAllCustomerLocations,
+  validatePointAgainstLandAndTerritory,
+} from '../../core/geo/geoValidationEngine';
 import type {
   DrawingToolMode,
   GeoFilterState,
   GeoLayerVisibility,
   GeoSelectionGeometry,
+  GeocodedCustomer,
   MapDisplayMode,
   OpportunityWeights,
   SavedMapView,
@@ -52,6 +62,8 @@ import { AdvancedLeafletMap } from './AdvancedLeafletMap';
 import { MapLayersControlPanel } from './MapLayersControlPanel';
 import { GeoContextPanel, type ContextPanelTab } from './GeoContextPanel';
 import { GuidedGeoDemoBar } from './GuidedGeoDemoBar';
+import { GeolocationQualityPanel } from './GeolocationQualityPanel';
+import { SemarangValidationBar } from './SemarangValidationBar';
 
 const DEFAULT_LAYERS: GeoLayerVisibility = {
   customerPoints: true,
@@ -87,13 +99,19 @@ export function LocationIntelligence() {
     setAiPanelOpen,
     mapFullscreen,
     setMapFullscreen,
+    logAuditEvent,
     showToast,
   } = usePlatform();
 
+  // Granular geolocation privacy permission: Platform Super Admin and Executive Management
+  // do NOT automatically receive precise residential coordinates.
   const canViewIndividualCustomers =
-    hasPermission(persona, 'customers.view') && hasPermission(persona, 'customers.view_detail');
+    hasPermission(persona, 'location.view_precise_customer') &&
+    hasPermission(persona, 'customers.view') &&
+    hasPermission(persona, 'customers.view_detail');
   const canCreateCampaign = hasPermission(persona, 'campaigns.create');
 
+  const provinceGeo = useMemo(() => getProvinceMapConfig(activeTenant), [activeTenant]);
   const geoConfig = useMemo(
     () => getIndustryGeoConfig(activeIndustry.id),
     [activeIndustry.id]
@@ -139,7 +157,11 @@ export function LocationIntelligence() {
   const [customViewsByTenant, setCustomViewsByTenant] = useState<Record<string, SavedMapView[]>>(
     {}
   );
+  const [validatedOverridesByTenant, setValidatedOverridesByTenant] = useState<
+    Record<string, GeocodedCustomer[]>
+  >({});
   const [guidedDemoStep, setGuidedDemoStep] = useState<number | null>(null);
+  const [semarangValidationStep, setSemarangValidationStep] = useState<number | null>(null);
 
   // Reset tenant-scoped selections when active tenant changes (strict zero cross-tenant bleed)
   useEffect(() => {
@@ -156,6 +178,7 @@ export function LocationIntelligence() {
     setFloatingPanelOpen(false);
     setOpenToolbarMenu('none');
     setGuidedDemoStep(null);
+    setSemarangValidationStep(null);
     setZoomTarget(null);
   }, [activeTenant.id, geoConfig.defaultRadiusKm]);
 
@@ -198,10 +221,18 @@ export function LocationIntelligence() {
     [activeTenant, activeIndustry.id, permittedRegionIds, scopedCustomers]
   );
 
-  const allGeocodedCustomers = useMemo(
+  const baseGeocodedCustomers = useMemo(
     () => buildGeocodedCustomers(activeTenant, scopedCustomers, allDealers),
     [activeTenant, scopedCustomers, allDealers]
   );
+
+  const allGeocodedCustomers = useMemo(() => {
+    const override = validatedOverridesByTenant[activeTenant.id];
+    if (override && override.length === baseGeocodedCustomers.length) {
+      return override;
+    }
+    return baseGeocodedCustomers;
+  }, [validatedOverridesByTenant, activeTenant.id, baseGeocodedCustomers]);
 
   const allCompetitors = useMemo(
     () => buildTenantCompetitors(activeTenant, activeIndustry.id, permittedRegionIds),
@@ -338,7 +369,51 @@ export function LocationIntelligence() {
     return [...custom, ...presets];
   }, [activeTenant, activeIndustry.id, customViewsByTenant]);
 
-  // Quick search suggestions (dealers + pseudonymous customers if authorized)
+  // Geolocation Data Quality Summary (computed live from active scope)
+  const qualitySummary = useMemo(
+    () => computeGeolocationQualitySummary(filteredCustomers),
+    [filteredCustomers]
+  );
+
+  // Semarang / Primary Territory live terrestrial verification counts
+  const semarangValidationMetrics = useMemo(() => {
+    const targetRegionId =
+      activeTenant.province.regencies.find((r) => r.id === 'reg-semarang')?.id ??
+      permittedRegencies[0]?.id;
+    const scoped = targetRegionId
+      ? allGeocodedCustomers.filter((c) => c.region_id === targetRegionId)
+      : allGeocodedCustomers;
+    let plottable = 0;
+    let invalid = 0;
+    let notGeocoded = 0;
+    let plottedSeaCount = 0;
+
+    for (const c of scoped) {
+      if (c.geolocation_status === 'NOT_GEOCODED') {
+        notGeocoded++;
+      } else if (!c.is_plottable || c.geolocation_status === 'INVALID_LOCATION') {
+        invalid++;
+      } else if (isPlottableCustomer(c)) {
+        plottable++;
+        const check = validatePointAgainstLandAndTerritory(
+          c.latitude,
+          c.longitude,
+          provinceGeo,
+          c.region_id
+        );
+        if (check.landStatus === 'IN_SEA_OR_WATER') plottedSeaCount++;
+      }
+    }
+    return {
+      total: scoped.length,
+      plottable,
+      invalid,
+      notGeocoded,
+      plottedSeaCount,
+    };
+  }, [activeTenant, permittedRegencies, allGeocodedCustomers, provinceGeo]);
+
+  // Quick search suggestions (dealers + customers by ID/District/Village/City/Segment/Dealer/Status if authorized)
   const searchMatches = useMemo(() => {
     const q = geoFilters.searchQuery.trim().toLowerCase();
     if (q.length < 2) return { dealers: [], customers: [] };
@@ -352,8 +427,11 @@ export function LocationIntelligence() {
       .slice(0, 4);
     const matchedCustomers = canViewIndividualCustomers
       ? allGeocodedCustomers
-          .filter((c) => c.pseudonym_code.toLowerCase().includes(q))
-          .slice(0, 4)
+          .filter((c) => {
+            const hay = `${c.customer_id} ${c.pseudonym_code} ${c.village_name} ${c.district_name} ${c.city_name} ${c.customer_segment} ${c.assigned_dealer_name} ${c.geolocation_status}`.toLowerCase();
+            return hay.includes(q);
+          })
+          .slice(0, 6)
       : [];
     return { dealers: matchedDealers, customers: matchedCustomers };
   }, [geoFilters.searchQuery, allDealers, allGeocodedCustomers, canViewIndividualCustomers]);
@@ -380,11 +458,20 @@ export function LocationIntelligence() {
           ? activeRegency.name
           : `All ${activeTenant.primaryProvinceName}`;
 
-  // Handlers (click-to-open contextual detail drawers)
+  // Handlers (click-to-open contextual detail drawers + audit logging)
   const handleSelectCustomer = useCallback(
     (customerId: string) => {
       if (!canViewIndividualCustomers) {
-        showToast('Individual customer inspection is restricted for your current role.');
+        logAuditEvent(
+          'Data Integration',
+          'Blocked Precise Customer Coordinate Access',
+          `Role ${persona.title} attempted to inspect precise coordinates for ${customerId}; blocked by location.view_precise_customer RBAC policy.`,
+          customerId,
+          'Blocked'
+        );
+        showToast(
+          'Precise customer coordinates are restricted for your role (location.view_precise_customer required).'
+        );
         return;
       }
       setSelectedCustomerId(customerId);
@@ -392,11 +479,95 @@ export function LocationIntelligence() {
       setDrawerOpen(true);
       const cust = allGeocodedCustomers.find((c) => c.customer_id === customerId);
       if (cust) {
-        setZoomTarget({ lat: cust.latitude, lng: cust.longitude, zoom: 13, nonce: Date.now() });
+        logAuditEvent(
+          'Data Integration',
+          'Inspected Customer Geolocation Coordinates',
+          `Viewed geolocation record ${cust.pseudonym_code} (${cust.geolocation_status}) in ${cust.city_name}.`,
+          cust.customer_id,
+          'Success'
+        );
+        if (isPlottableCustomer(cust)) {
+          setZoomTarget({ lat: cust.latitude, lng: cust.longitude, zoom: 14, nonce: Date.now() });
+        } else {
+          showToast(
+            `Location Not Available for ${cust.pseudonym_code} (${cust.geolocation_status}) — excluded from map.`
+          );
+        }
       }
     },
-    [canViewIndividualCustomers, allGeocodedCustomers, showToast]
+    [canViewIndividualCustomers, allGeocodedCustomers, logAuditEvent, persona.title, showToast]
   );
+
+  const handleShowNearestDealer = useCallback(
+    (cust: GeocodedCustomer) => {
+      const dealer = allDealers.find((d) => d.dealer_id === cust.nearest_dealer_id);
+      setLayers((prev) => ({ ...prev, customerToDealerLines: true, dealers: true, serviceCenters: true }));
+      if (dealer) {
+        setSelectedDealerId(dealer.dealer_id);
+        if (isPlottableCustomer(cust)) {
+          const midLat = (cust.latitude + dealer.latitude) / 2;
+          const midLng = (cust.longitude + dealer.longitude) / 2;
+          setZoomTarget({ lat: midLat, lng: midLng, zoom: 13, nonce: Date.now() });
+        }
+        showToast(
+          `Nearest network unit: ${dealer.name} (${cust.nearest_dealer_distance_km} km straight-line)`
+        );
+      }
+    },
+    [allDealers, showToast]
+  );
+
+  const handleValidateAllLocations = useCallback(() => {
+    const timestamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
+    const validated = validateAllCustomerLocations(allGeocodedCustomers, provinceGeo, timestamp);
+    setValidatedOverridesByTenant((prev) => ({
+      ...prev,
+      [activeTenant.id]: validated,
+    }));
+    const summary = computeGeolocationQualitySummary(validated);
+    logAuditEvent(
+      'Data Integration',
+      'Executed EPSG:4326 Geolocation Validation',
+      `Validated ${summary.totalCustomers} customer records in ${activeTenant.primaryProvinceName}: ${summary.plottableCustomers} valid on-land, ${summary.invalidCoordinates} quarantined, ${summary.unmappedCustomers} not geocoded, 0 plotted sea points.`,
+      activeTenant.id,
+      'Success'
+    );
+    showToast(
+      `Validated ${formatNumber(summary.totalCustomers)} locations: ${formatNumber(summary.plottableCustomers)} valid on-land · ${summary.invalidCoordinates} quarantined · ${summary.unmappedCustomers} unmapped · 0 plotted sea points.`
+    );
+  }, [allGeocodedCustomers, provinceGeo, activeTenant, logAuditEvent, showToast]);
+
+  const handleExportValidationReport = useCallback(() => {
+    const csv = buildValidationReportCsv(
+      filteredCustomers,
+      activeTenant.name,
+      canViewIndividualCustomers
+    );
+    const filename = `serveon-geolocation-validation-${activeTenant.code.toLowerCase()}.csv`;
+    try {
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch {
+      // Headless / non-DOM environments safely ignore download anchor
+    }
+    logAuditEvent(
+      'Data Integration',
+      'Exported Geolocation Validation Report',
+      `Exported ${filteredCustomers.length} validation records (${canViewIndividualCustomers ? 'precise coordinates' : 'RBAC privacy-masked coordinates'}) to ${filename}.`,
+      filename,
+      'Success'
+    );
+    showToast(
+      `Exported ${filename} (${formatNumber(filteredCustomers.length)} rows${canViewIndividualCustomers ? '' : ', coordinates masked by RBAC'}).`
+    );
+  }, [filteredCustomers, activeTenant, canViewIndividualCustomers, logAuditEvent, showToast]);
 
   const handleSelectDealer = useCallback(
     (dealerId: string) => {
@@ -577,13 +748,14 @@ export function LocationIntelligence() {
         const outerRisk =
           allGeocodedCustomers.find(
             (c) =>
+              isPlottableCustomer(c) &&
               c.region_id === primaryReg.id &&
               c.marker_group === 'at_risk' &&
               c.nearest_dealer_distance_km > 5
           ) ??
-          allGeocodedCustomers.find((c) => c.region_id === primaryReg.id) ??
-          allGeocodedCustomers[0];
-        if (outerRisk && canViewIndividualCustomers) {
+          allGeocodedCustomers.find((c) => isPlottableCustomer(c) && c.region_id === primaryReg.id) ??
+          allGeocodedCustomers.find(isPlottableCustomer);
+        if (outerRisk && isPlottableCustomer(outerRisk) && canViewIndividualCustomers) {
           setSelectedCustomerId(outerRisk.customer_id);
           setLayers((prev) => ({ ...prev, customerToDealerLines: true }));
           setContextTab('customer');
@@ -672,6 +844,61 @@ export function LocationIntelligence() {
     }
   };
 
+  // Interactive Semarang Customer Location Validation orchestrator (Spec Section 13)
+  const applySemarangValidationStep = useCallback(
+    (stepIdx: number) => {
+      setSemarangValidationStep(stepIdx);
+      setGuidedDemoStep(null);
+      const semarangReg =
+        permittedRegencies.find((r) => r.id === 'reg-semarang') ?? permittedRegencies[0];
+
+      if (stepIdx === 0 && semarangReg) {
+        setGeoDrilldown({ regionId: semarangReg.id, districtId: 'ALL', villageId: 'ALL' });
+        setGeoFilters(DEFAULT_GEO_FILTERS);
+        setMapMode(canViewIndividualCustomers ? 'points' : 'clusters');
+        setLayers({ ...DEFAULT_LAYERS, territoryBoundaries: true, opportunityOverlay: false });
+        setContextTab('territory');
+        setDrawerOpen(true);
+      } else if (stepIdx === 1) {
+        if (semarangReg) {
+          setGeoDrilldown({ regionId: semarangReg.id, districtId: 'ALL', villageId: 'ALL' });
+        }
+        handleValidateAllLocations();
+      } else if (stepIdx === 2 && semarangReg) {
+        setGeoDrilldown({ regionId: semarangReg.id, districtId: 'ALL', villageId: 'ALL' });
+        setMapMode('clusters');
+        setZoomTarget({ lat: -7.015, lng: 110.42, zoom: 11, nonce: Date.now() });
+        setContextTab('territory');
+        setDrawerOpen(true);
+      } else if (stepIdx === 3 && semarangReg) {
+        setGeoDrilldown({ regionId: semarangReg.id, districtId: 'ALL', villageId: 'ALL' });
+        setMapMode(canViewIndividualCustomers ? 'points' : 'clusters');
+        setZoomTarget({ lat: -6.993, lng: 110.42, zoom: 13, nonce: Date.now() });
+      } else if (stepIdx === 4 && semarangReg) {
+        const sample = allGeocodedCustomers.find(
+          (c) => isPlottableCustomer(c) && c.region_id === semarangReg.id
+        );
+        if (sample && canViewIndividualCustomers) {
+          handleSelectCustomer(sample.customer_id);
+        } else {
+          setContextTab('customer');
+          setDrawerOpen(true);
+        }
+      } else if (stepIdx === 5) {
+        handleExportValidationReport();
+      }
+    },
+    [
+      permittedRegencies,
+      setGeoDrilldown,
+      canViewIndividualCustomers,
+      handleValidateAllLocations,
+      allGeocodedCustomers,
+      handleSelectCustomer,
+      handleExportValidationReport,
+    ]
+  );
+
   const activeFilterCount = useMemo(() => {
     let n = 0;
     if (selectedRegencyId !== 'ALL') n++;
@@ -684,6 +911,7 @@ export function LocationIntelligence() {
     if (geoFilters.valueTier !== 'ALL') n++;
     if (geoFilters.productOwnership !== 'ALL') n++;
     if (geoFilters.assignedDealerId !== 'ALL') n++;
+    if (geoFilters.geolocationStatus !== 'ALL') n++;
     if (geoFilters.onlyOutsideCoverage) n++;
     return n;
   }, [selectedRegencyId, selectedDistrictId, selectedVillageId, geoFilters]);
@@ -716,6 +944,15 @@ export function LocationIntelligence() {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
+          <button
+            type="button"
+            data-testid="btn-semarang-validation"
+            onClick={() => applySemarangValidationStep(0)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#15946A] bg-[#F2FBF7] px-2.5 text-xs font-semibold text-[#102B4D] transition-colors hover:bg-emerald-100/70 whitespace-nowrap"
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-[#15946A]" />
+            <span>Semarang Validation</span>
+          </button>
           <button
             type="button"
             onClick={() => applyGuidedDemoStep(0)}
@@ -769,6 +1006,22 @@ export function LocationIntelligence() {
         </div>
       </div>
 
+      {/* Optional Semarang Geolocation Validation Workflow Bar */}
+      {semarangValidationStep !== null && (
+        <SemarangValidationBar
+          activeStep={semarangValidationStep}
+          isAstraMotor={activeTenant.id === 'tenant-astra-motor'}
+          semarangTotal={semarangValidationMetrics.total}
+          semarangPlottable={semarangValidationMetrics.plottable}
+          semarangInvalid={semarangValidationMetrics.invalid}
+          semarangNotGeocoded={semarangValidationMetrics.notGeocoded}
+          semarangPlottedSeaCount={semarangValidationMetrics.plottedSeaCount}
+          onSelectStep={applySemarangValidationStep}
+          onExportReport={handleExportValidationReport}
+          onClose={() => setSemarangValidationStep(null)}
+        />
+      )}
+
       {/* Optional Guided Geo Demo Walkthrough Bar */}
       {guidedDemoStep !== null && (
         <GuidedGeoDemoBar
@@ -784,10 +1037,10 @@ export function LocationIntelligence() {
         <div
           role="toolbar"
           aria-label="Geospatial analysis toolbar"
-          className="relative z-[440] flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50/95 px-3 py-2"
+          className="relative z-[440] flex flex-wrap items-center gap-1.5 border-b border-slate-200 bg-slate-50/95 px-2.5 py-2"
         >
           {/* 1. Search */}
-          <div className="relative min-w-[200px] flex-1 sm:max-w-[260px]">
+          <div className="relative min-w-[160px] flex-1 sm:max-w-[205px]">
             <Search className="pointer-events-none absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
             <input
               id="geo-search"
@@ -797,10 +1050,10 @@ export function LocationIntelligence() {
               onChange={(e) => setGeoFilters((prev) => ({ ...prev, searchQuery: e.target.value }))}
               placeholder={
                 canViewIndividualCustomers
-                  ? `Search dealer, city, or ${allGeocodedCustomers[0]?.pseudonym_code ?? 'ASM-0001'}`
-                  : 'Search dealer, branch, or city...'
+                  ? `Search ID, village, dealer...`
+                  : 'Search dealer, branch, city...'
               }
-              className="h-8 w-full rounded-lg border border-slate-300 bg-white pl-8 pr-2.5 text-xs text-slate-900 focus:border-[#1769AA] focus:outline-none"
+              className="h-8 w-full rounded-lg border border-slate-300 bg-white pl-8 pr-2 text-xs text-slate-900 focus:border-[#1769AA] focus:outline-none"
             />
             {(searchMatches.dealers.length > 0 || searchMatches.customers.length > 0) && (
               <div className="absolute left-0 right-0 top-full z-[470] mt-1 max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1.5 text-xs shadow-lg">
@@ -828,13 +1081,22 @@ export function LocationIntelligence() {
                       setGeoFilters((prev) => ({ ...prev, searchQuery: '' }));
                       handleSelectCustomer(c.customer_id);
                     }}
-                    className="flex w-full items-center justify-between rounded px-2 py-1.5 text-left hover:bg-slate-50"
+                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left hover:bg-slate-50"
                   >
-                    <span className="font-mono font-semibold text-[#1769AA]">
-                      {c.pseudonym_code}
-                    </span>
-                    <span className="truncate text-[10.5px] text-slate-500">
-                      {c.region_name} · {c.customer_segment}
+                    <div className="min-w-0">
+                      <span className="font-mono font-semibold text-[#1769AA]">
+                        {c.pseudonym_code}
+                      </span>
+                      <span className="ml-1.5 text-[10.5px] text-slate-500">
+                        {c.village_name}, {c.district_name}
+                      </span>
+                    </div>
+                    <span
+                      className={`shrink-0 font-mono text-[9.5px] font-semibold ${
+                        c.is_plottable ? 'text-[#15946A]' : 'text-red-600'
+                      }`}
+                    >
+                      {c.is_plottable ? c.city_name : 'Location N/A'}
                     </span>
                   </button>
                 ))}
@@ -891,15 +1153,15 @@ export function LocationIntelligence() {
                     | 'opportunity'
                 )
               }
-              className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-[#102B4D] focus:border-[#1769AA] focus:outline-none"
+              className="h-8 rounded-lg border border-slate-300 bg-white px-2 text-xs font-semibold text-[#102B4D] focus:border-[#1769AA] focus:outline-none"
             >
               <option value="points">
-                {canViewIndividualCustomers ? 'Map Mode: Customer Points' : 'Map Mode: Customer Clusters (RBAC)'}
+                {canViewIndividualCustomers ? 'Mode: Customer Points' : 'Mode: Clusters (RBAC)'}
               </option>
-              <option value="heatmap">Map Mode: Customer Heatmap</option>
-              <option value="dealer_coverage">Map Mode: Dealer Coverage</option>
-              <option value="competitor_analysis">Map Mode: Competitor Analysis</option>
-              <option value="opportunity">Map Mode: Market Opportunity</option>
+              <option value="heatmap">Mode: Customer Heatmap</option>
+              <option value="dealer_coverage">Mode: Dealer Coverage</option>
+              <option value="competitor_analysis">Mode: Competitor Analysis</option>
+              <option value="opportunity">Mode: Market Opportunity</option>
             </select>
 
             {isHeatmapMode && (
@@ -1157,11 +1419,32 @@ export function LocationIntelligence() {
             )}
           </div>
 
-          {/* 7. Fullscreen (hides sidebar while preserving top navigation) */}
+          {/* 7. Data Quality Dashboard Quick Jump */}
+          {!mapFullscreen && (
+            <button
+              type="button"
+              data-testid="btn-toolbar-data-quality"
+              onClick={() => {
+                const el = document.getElementById('geolocation-quality-dashboard');
+                el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }}
+              className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 text-xs font-semibold text-slate-700 transition-colors hover:bg-slate-100 whitespace-nowrap"
+            >
+              <ShieldCheck className="h-3.5 w-3.5 text-[#15946A]" />
+              <span>Data Quality</span>
+              {qualitySummary.invalidCoordinates + qualitySummary.unmappedCustomers > 0 && (
+                <span className="font-mono text-[10.5px] font-bold text-amber-700">
+                  ({qualitySummary.invalidCoordinates + qualitySummary.unmappedCustomers})
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* 8. Fullscreen (hides sidebar while preserving top navigation) */}
           <button
             type="button"
             onClick={() => setMapFullscreen(!mapFullscreen)}
-            className={`ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+            className={`${mapFullscreen ? 'ml-auto ' : ''}inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ${
               mapFullscreen
                 ? 'border-[#102B4D] bg-[#102B4D] text-white'
                 : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
@@ -1275,8 +1558,10 @@ export function LocationIntelligence() {
             <GeoContextPanel
               activeTab={contextTab}
               onChangeTab={setContextTab}
+              tenantName={activeTenant.name}
               geoConfig={geoConfig}
               provinceName={activeTenant.primaryProvinceName}
+              provinceGeo={provinceGeo}
               activeTerritoryTitle={activeTerritoryTitle}
               selectedRegionId={selectedRegencyId}
               selectedDistrictId={selectedDistrictId}
@@ -1307,6 +1592,7 @@ export function LocationIntelligence() {
               canCreateCampaign={canCreateCampaign}
               onSelectCustomer={handleSelectCustomer}
               onSelectDealer={handleSelectDealer}
+              onShowNearestDealer={handleShowNearestDealer}
               onSelectRegion={(regionId) => {
                 setGeoDrilldown({ regionId, districtId: 'ALL', villageId: 'ALL' });
               }}
@@ -1340,6 +1626,20 @@ export function LocationIntelligence() {
           )}
         </div>
       </div>
+
+      {/* GEOLOCATION DATA QUALITY & VALIDATION CENTER */}
+      {!mapFullscreen && (
+        <GeolocationQualityPanel
+          tenantName={activeTenant.name}
+          provinceGeo={provinceGeo}
+          customers={filteredCustomers}
+          summary={qualitySummary}
+          canViewIndividualCustomers={canViewIndividualCustomers}
+          onValidateAllLocations={handleValidateAllLocations}
+          onExportValidationReport={handleExportValidationReport}
+          onInspectCustomer={handleSelectCustomer}
+        />
+      )}
 
       {/* BELOW-FOLD ANALYTICS TABLES: Territory Opportunity & Gap Ranking + Network Matrix */}
       {!mapFullscreen && (

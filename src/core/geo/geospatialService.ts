@@ -21,8 +21,26 @@ import type {
   OpportunityWeights,
   SavedMapView,
 } from '../../types/geospatial';
-import { getProvinceMapConfig } from '../../data/geo/indonesiaGeo';
+import { getProvinceMapConfig, type ProvinceMapConfig } from '../../data/geo/indonesiaGeo';
 import { evaluateCustomerConsent } from '../ai-engine/mvp3Engine';
+import {
+  generateValidatedTerrestrialPoint,
+  isValidWgs84Coordinate,
+  validatePointAgainstLandAndTerritory,
+} from './geoValidationEngine';
+
+const geocodedFixtureCache = new Map<string, GeocodedCustomer[]>();
+
+export function isPlottableCustomer(
+  c: Pick<GeocodedCustomer, 'latitude' | 'longitude' | 'is_plottable'>
+): c is GeocodedCustomer & { latitude: number; longitude: number } {
+  return (
+    c.is_plottable &&
+    c.latitude !== null &&
+    c.longitude !== null &&
+    isValidWgs84Coordinate(c.latitude, c.longitude)
+  );
+}
 
 export const DEFAULT_OPPORTUNITY_WEIGHTS: OpportunityWeights = {
   concentration: 25,
@@ -346,15 +364,25 @@ export function buildTenantDealerNetwork(
     });
 
   // Add realistic satellite service/branch points in the primary regency when it has < 3 nodes
-  // so Dealer vs Service/AHASS vs Branch layer toggles are always rich and clear.
+  // Validated strictly against the province terrestrial land mask so no satellite node lands in water.
+  const provinceGeo = getProvinceMapConfig(tenant);
   const primaryReg = tenant.province.regencies.find((r) => permittedSet.has(r.id));
   if (primaryReg) {
+    const primaryTerritory = provinceGeo.territories.find((t) => t.regionId === primaryReg.id);
     const primaryNodes = baseNodes.filter((n) => n.region_id === primaryReg.id);
     const hasService = primaryNodes.some((n) => n.network_category === 'service');
     const hasBranch = primaryNodes.some((n) => n.network_category === 'branch');
 
-    if (!hasService && primaryNodes.length > 0) {
+    if (!hasService && primaryNodes.length > 0 && primaryTerritory) {
       const anchor = primaryNodes[0];
+      const satPt = generateValidatedTerrestrialPoint({
+        seedKey: `sat-svc-${tenant.id}-${primaryReg.id}`,
+        provinceGeo,
+        territory: primaryTerritory,
+        anchorLat: anchor.latitude,
+        anchorLng: anchor.longitude,
+        isCompactMetro: tenant.primaryProvinceId === 'prov-jakarta',
+      });
       baseNodes.push({
         dealer_id: `${anchor.dealer_id}-svc-sat`,
         tenant_id: tenant.id,
@@ -368,8 +396,8 @@ export function buildTenantDealerNetwork(
         network_category: 'service',
         address: `East Corridor, ${primaryReg.name} (Synthetic Demo)`,
         operational_status: 'Express Active',
-        latitude: Number((anchor.latitude + 0.024).toFixed(5)),
-        longitude: Number((anchor.longitude + 0.031).toFixed(5)),
+        latitude: satPt.latitude,
+        longitude: satPt.longitude,
         service_capacity_pct: 82,
         service_volume_monthly: Math.max(120, Math.round(anchor.service_volume_monthly * 0.72)),
         assigned_customers: Math.round(anchor.assigned_customers * 0.3),
@@ -377,8 +405,16 @@ export function buildTenantDealerNetwork(
       });
     }
 
-    if (!hasBranch && primaryNodes.length > 0) {
+    if (!hasBranch && primaryNodes.length > 0 && primaryTerritory) {
       const anchor = primaryNodes[0];
+      const brPt = generateValidatedTerrestrialPoint({
+        seedKey: `sat-br-${tenant.id}-${primaryReg.id}`,
+        provinceGeo,
+        territory: primaryTerritory,
+        anchorLat: anchor.latitude,
+        anchorLng: anchor.longitude,
+        isCompactMetro: tenant.primaryProvinceId === 'prov-jakarta',
+      });
       baseNodes.push({
         dealer_id: `${anchor.dealer_id}-br-sat`,
         tenant_id: tenant.id,
@@ -392,8 +428,8 @@ export function buildTenantDealerNetwork(
         network_category: 'branch',
         address: `Central Business District, ${primaryReg.name} (Synthetic Demo)`,
         operational_status: 'Operational',
-        latitude: Number((anchor.latitude - 0.028).toFixed(5)),
-        longitude: Number((anchor.longitude - 0.026).toFixed(5)),
+        latitude: brPt.latitude,
+        longitude: brPt.longitude,
         service_capacity_pct: 79,
         service_volume_monthly: Math.max(95, Math.round(anchor.service_volume_monthly * 0.55)),
         assigned_customers: Math.round(anchor.assigned_customers * 0.2),
@@ -407,6 +443,7 @@ export function buildTenantDealerNetwork(
 
 /**
  * Deterministic synthetic competitor reference locations per tenant/industry.
+ * Validated strictly against terrestrial land masks so zero competitors appear in water.
  * Explicitly labeled illustrative synthetic data — never presented as verified real branches.
  */
 export function buildTenantCompetitors(
@@ -422,19 +459,22 @@ export function buildTenantCompetitors(
   for (const reg of tenant.province.regencies) {
     if (!permittedSet.has(reg.id)) continue;
     const territory = provinceGeo.territories.find((t) => t.regionId === reg.id);
-    const centerLat = territory?.center[0] ?? reg.lat;
-    const centerLng = territory?.center[1] ?? reg.lng;
+    if (!territory) continue;
 
-    // 3 illustrative competitors in primary/high-potential cities, 2 in smaller regencies
+    // 4 illustrative competitors in primary/high-potential cities, 2 in smaller regencies
     const count = reg.marketPotentialIndex >= 85 ? 4 : 2;
-    const spreadDeg = tenant.primaryProvinceId === 'prov-jakarta' ? 0.032 : 0.068;
 
     for (let i = 0; i < count; i++) {
       const key = `comp-${tenant.id}-${reg.id}-${i}`;
-      const angle = seededUnit(`${key}-ang`) * Math.PI * 2;
-      const radiusFactor = 0.28 + seededUnit(`${key}-rad`) * 0.72;
-      const lat = Number((centerLat + Math.cos(angle) * spreadDeg * radiusFactor).toFixed(5));
-      const lng = Number((centerLng + Math.sin(angle) * spreadDeg * radiusFactor * 1.15).toFixed(5));
+      const pt = generateValidatedTerrestrialPoint({
+        seedKey: key,
+        provinceGeo,
+        territory,
+        anchorLat: territory.center[0],
+        anchorLng: territory.center[1],
+        preferOuterRing: i % 2 === 1,
+        isCompactMetro: tenant.primaryProvinceId === 'prov-jakarta',
+      });
       const isService = i % 2 === 1;
       const brand = geoConfig.competitorBrands[i % geoConfig.competitorBrands.length];
       const shortCity = reg.name.replace(/^Kota |^Kab\. & Kota |^Kab\. /, '');
@@ -450,11 +490,11 @@ export function buildTenantCompetitors(
           ? geoConfig.competitorServiceLabel
           : geoConfig.competitorDealerLabel,
         location_name: `${brand.replace(' (Illustrative)', '')} — ${shortCity} ${isService ? 'Service Point' : 'Outlet'} ${i + 1}`,
-        latitude: lat,
-        longitude: lng,
+        latitude: pt.latitude,
+        longitude: pt.longitude,
         address: `Corridor ${i + 1}, ${reg.name} (Illustrative Synthetic Reference)`,
         location_source: 'Illustrative Synthetic Reference Data (Demo Only)',
-        last_verified_date: '2026-11-15 (Synthetic Demo Baseline)',
+        last_verified_date: '2026-11-24 (Terrestrial Land-Validated Demo Baseline)',
       });
     }
   }
@@ -478,64 +518,266 @@ function deriveMarkerGroup(c: CustomerRecord): CustomerMarkerGroup {
 }
 
 /**
- * Deterministically geocode tenant customers to valid WGS-84 coordinates anchored to
- * their district centroid / territory polygon with realistic urban + outer-catchment spread
- * so coverage radius (1–15 km) and outside-coverage at-risk analytics work cleanly.
+ * Deterministically build and cache EPSG:4326 terrestrial-validated customer locations.
+ *
+ * Replaces unconstrained bounding-box / radial coordinate generation with:
+ * - Constrained sampling inside (Administrative Territory ∩ Province Land Mask \ Sea Exclusion)
+ * - Stable cached fixtures (never regenerated on map renders)
+ * - Explicit quarantine of synthetic data-quality anomalies (INVALID_LOCATION / NOT_GEOCODED)
+ *   so invalid coordinates are reported & reconciled in Data Quality, never plotted in the sea.
  */
 export function buildGeocodedCustomers(
   tenant: Tenant,
   customers: CustomerRecord[],
   dealers: DealerNetworkNode[]
 ): GeocodedCustomer[] {
+  const dealerSig = dealers.map((d) => d.dealer_id).join(',');
+  const firstId = customers[0]?.customer_id ?? 'none';
+  const lastId = customers[customers.length - 1]?.customer_id ?? 'none';
+  const cacheKey = `${tenant.id}:${customers.length}:${firstId}:${lastId}:${dealerSig}`;
+  const cached = geocodedFixtureCache.get(cacheKey);
+  if (cached) return cached;
+
   const provinceGeo = getProvinceMapConfig(tenant);
   const territoryMap = new Map(provinceGeo.territories.map((t) => [t.regionId, t]));
   const regMap = new Map(tenant.province.regencies.map((r) => [r.id, r]));
+  const districtNameMap = new Map<string, string>();
+  const villageNameMap = new Map<string, string>();
+  for (const reg of tenant.province.regencies) {
+    for (const dist of reg.districts) {
+      districtNameMap.set(dist.id, dist.name);
+      for (const vil of dist.villages) {
+        villageNameMap.set(vil.id, vil.name);
+      }
+    }
+  }
   const dealerMap = new Map(dealers.map((d) => [d.dealer_id, d]));
-
   const isCompactMetro = tenant.primaryProvinceId === 'prov-jakarta';
-  const [[minLat, minLng], [maxLat, maxLng]] = provinceGeo.bounds;
 
   const result: GeocodedCustomer[] = [];
+  const verifiedTimestamp = '2026-11-24 08:00';
 
-  for (const c of customers) {
+  for (let idx = 0; idx < customers.length; idx++) {
+    const c = customers[idx];
     if (c.tenant_id !== tenant.id) continue;
 
-    const territory = territoryMap.get(c.region_id);
+    const territory = territoryMap.get(c.region_id) ?? provinceGeo.territories[0];
     const reg = regMap.get(c.region_id);
-    const assignedDealer = dealerMap.get(c.branch_id) ?? dealers.find((d) => d.region_id === c.region_id) ?? dealers[0];
+    const assignedDealer =
+      dealerMap.get(c.branch_id) ??
+      dealers.find((d) => d.region_id === c.region_id) ??
+      dealers[0];
 
+    const villageAnchor = territory?.villageAnchors[c.village_id];
     const districtAnchor = territory?.districtCentroids[c.district_id];
-    const baseLat = districtAnchor?.[0] ?? assignedDealer?.latitude ?? territory?.center[0] ?? reg?.lat ?? provinceGeo.center[0];
-    const baseLng = districtAnchor?.[1] ?? assignedDealer?.longitude ?? territory?.center[1] ?? reg?.lng ?? provinceGeo.center[1];
+    const anchorLat =
+      villageAnchor?.lat ??
+      districtAnchor?.[0] ??
+      territory?.center[0] ??
+      reg?.lat ??
+      provinceGeo.center[0];
+    const anchorLng =
+      villageAnchor?.lng ??
+      districtAnchor?.[1] ??
+      territory?.center[1] ??
+      reg?.lng ??
+      provinceGeo.center[1];
 
-    // Deterministic polar offset around anchor in 3 realistic distance rings:
-    // ~54% inner core (0.5–4.4 km), ~28% mid ring (4.6–8.8 km), ~18% outer ring (9.0–14.5 km)
-    // At-risk customers slightly skewed toward outer ring to reveal realistic coverage gaps
-    const uAngle = seededUnit(`geo-ang-${c.tenant_id}-${c.customer_id}`);
-    const uRing = seededUnit(`geo-ring-${c.tenant_id}-${c.customer_id}`);
-    const uJitter = seededUnit(`geo-jit-${c.tenant_id}-${c.customer_id}`);
+    const villageName = villageNameMap.get(c.village_id) ?? c.village_id;
+    const districtName = districtNameMap.get(c.district_id) ?? c.district_id;
+    const cityName = reg?.name ?? c.demographic_attributes.city;
+    const provinceName = tenant.primaryProvinceName;
+    const postalCode = villageAnchor?.postalCode ?? territory?.defaultPostalCode ?? 'Unavailable';
 
-    const isAtRisk = c.status === 'At-Risk' || c.model_outputs.churn_risk_category === 'High';
-    const innerCutoff = isAtRisk ? 0.42 : 0.58;
-    const midCutoff = isAtRisk ? 0.72 : 0.85;
+    const latestTx = c.transactions[0];
+    const lastPurchaseDate = latestTx?.date ?? c.last_activity_date;
+    const lastServiceDate = c.last_activity_date;
+    const daysSinceService = daysBetween(lastServiceDate);
+    const latestInter = c.interactions[0];
+    const consent = evaluateCustomerConsent(c);
 
-    let distKm: number;
-    if (uRing < innerCutoff) {
-      distKm = isCompactMetro ? 0.35 + uJitter * 2.4 : 0.5 + uJitter * 3.8;
-    } else if (uRing < midCutoff) {
-      distKm = isCompactMetro ? 2.8 + uJitter * 2.8 : 4.4 + uJitter * 4.4;
-    } else {
-      distKm = isCompactMetro ? 5.6 + uJitter * 3.4 : 9.0 + uJitter * 5.8;
+    // Deterministic data-quality anomaly fixtures (~1% quarantined so Geolocation Data Quality Dashboard
+    // demonstrates genuine reconciliation without EVER plotting invalid/offshore points on the map).
+    const anomalyBucket = fnv1aHash(`dq-fixture-${c.tenant_id}-${c.customer_id}`) % 250;
+    const isNotGeocodedFixture = anomalyBucket === 17 || anomalyBucket === 141; // ~0.8%
+    const isInvalidOffshoreFixture = anomalyBucket === 73; // ~0.4% (raw CRM offshore/out-of-territory rejected by validator)
+
+    if (isNotGeocodedFixture) {
+      result.push({
+        customer_id: c.customer_id,
+        pseudonym_code: c.code,
+        tenant_id: c.tenant_id,
+        business_unit_id: c.business_unit_id,
+        customer_segment: c.customer_segment,
+        status: c.status,
+        lifecycle_stage: c.lifecycle_stage,
+        latitude: null,
+        longitude: null,
+        raw_source_latitude: null,
+        raw_source_longitude: null,
+        address_line: 'Source Address Incomplete — Not Geocoded',
+        village_name: villageName,
+        district_name: districtName,
+        city_name: cityName,
+        province_name: provinceName,
+        postal_code: postalCode,
+        reverse_geocoded_address: null,
+        geolocation_source: 'Pending Geocoding (No Coordinates Stored)',
+        geolocation_method: 'None — Awaiting Approved Geocoding Provider',
+        geolocation_accuracy: 'Unavailable',
+        geolocation_confidence: 0,
+        geolocation_status: 'NOT_GEOCODED',
+        coordinate_validation_status: 'MISSING',
+        land_validation_status: 'UNAVAILABLE',
+        territory_validation_status: 'UNAVAILABLE',
+        validation_issue:
+          'Missing latitude/longitude in customer record — excluded from map until geocoded.',
+        is_plottable: false,
+        geocoded_at: null,
+        last_verified_at: verifiedTimestamp,
+        location_accuracy: 'Unavailable (Not Geocoded)',
+        location_source: 'Pending Geocoding',
+        last_purchase_date: lastPurchaseDate,
+        last_service_date: lastServiceDate,
+        days_since_last_service: daysSinceService,
+        lifetime_value: c.lifetime_value,
+        churn_risk: c.model_outputs.churn_risk_score,
+        churn_risk_category: c.model_outputs.churn_risk_category,
+        purchase_propensity: c.model_outputs.purchase_propensity_score,
+        geographic_opportunity_score: c.model_outputs.geographic_opportunity_score,
+        assigned_dealer_id: assignedDealer?.dealer_id ?? c.branch_id,
+        assigned_dealer_name: assignedDealer?.name ?? c.branch_id,
+        assigned_dealer_distance_km: 0,
+        nearest_dealer_id: assignedDealer?.dealer_id ?? c.branch_id,
+        nearest_dealer_name: assignedDealer?.name ?? c.branch_id,
+        nearest_dealer_distance_km: 0,
+        region_id: c.region_id,
+        region_name: cityName,
+        district_id: c.district_id,
+        village_id: c.village_id,
+        product_primary: c.products[0]?.name ?? 'Primary Holding',
+        preferred_channel: c.demographic_attributes.preferred_channel,
+        latest_interaction_summary: latestInter
+          ? `${latestInter.type} (${latestInter.date} · ${latestInter.outcome})`
+          : `Last activity ${c.last_activity_date}`,
+        marker_group: deriveMarkerGroup(c),
+        has_consent: consent.hasConsent,
+        opted_out: consent.optedOut,
+        suppressed: consent.suppressed,
+      });
+      continue;
     }
 
-    const angle = uAngle * Math.PI * 2;
-    const dLat = (distKm / 111.32) * Math.cos(angle);
-    const dLng = (distKm / (111.32 * Math.cos((baseLat * Math.PI) / 180))) * Math.sin(angle);
+    if (isInvalidOffshoreFixture) {
+      // Simulate a legacy unvalidated offshore coordinate caught & quarantined by the EPSG:4326 land mask
+      // Never plotted on the map and never silently snapped to land!
+      const rawBadLat =
+        tenant.primaryProvinceId === 'prov-jateng'
+          ? -6.895
+          : tenant.primaryProvinceId === 'prov-jakarta'
+            ? -6.045
+            : tenant.primaryProvinceId === 'prov-bali'
+              ? -8.02
+              : tenant.primaryProvinceId === 'prov-jatim'
+                ? -7.12
+                : -6.02;
+      const rawBadLng =
+        tenant.primaryProvinceId === 'prov-jateng'
+          ? 110.42
+          : tenant.primaryProvinceId === 'prov-jakarta'
+            ? 106.84
+            : tenant.primaryProvinceId === 'prov-bali'
+              ? 115.12
+              : tenant.primaryProvinceId === 'prov-jatim'
+                ? 112.92
+                : 108.62;
+      const badCheck = validatePointAgainstLandAndTerritory(
+        rawBadLat,
+        rawBadLng,
+        provinceGeo,
+        c.region_id
+      );
 
-    const rawLat = Math.max(minLat + 0.015, Math.min(maxLat - 0.015, baseLat + dLat));
-    const rawLng = Math.max(minLng + 0.015, Math.min(maxLng - 0.015, baseLng + dLng));
-    const latitude = Number(rawLat.toFixed(5));
-    const longitude = Number(rawLng.toFixed(5));
+      result.push({
+        customer_id: c.customer_id,
+        pseudonym_code: c.code,
+        tenant_id: c.tenant_id,
+        business_unit_id: c.business_unit_id,
+        customer_segment: c.customer_segment,
+        status: c.status,
+        lifecycle_stage: c.lifecycle_stage,
+        latitude: rawBadLat,
+        longitude: rawBadLng,
+        raw_source_latitude: rawBadLat,
+        raw_source_longitude: rawBadLng,
+        address_line: 'Quarantined Source Record — Coordinate Failed Land Validation',
+        village_name: villageName,
+        district_name: districtName,
+        city_name: cityName,
+        province_name: provinceName,
+        postal_code: postalCode,
+        reverse_geocoded_address: null,
+        geolocation_source: 'Legacy Unvalidated Import (Quarantined Demo Sample)',
+        geolocation_method: 'Rejected by EPSG:4326 Land-Mask & Territory Validator',
+        geolocation_accuracy: 'Invalid — Quarantined (Not Plotted)',
+        geolocation_confidence: 0,
+        geolocation_status: 'INVALID_LOCATION',
+        coordinate_validation_status: badCheck.coordinateStatus,
+        land_validation_status: badCheck.landStatus,
+        territory_validation_status: badCheck.territoryStatus,
+        validation_issue:
+          badCheck.issueDescription ??
+          'Raw coordinate failed terrestrial land-mask validation — quarantined and not plotted.',
+        is_plottable: false,
+        geocoded_at: '2026-10-12 14:20',
+        last_verified_at: verifiedTimestamp,
+        location_accuracy: 'Invalid — Quarantined',
+        location_source: 'Legacy Import (Quarantined)',
+        last_purchase_date: lastPurchaseDate,
+        last_service_date: lastServiceDate,
+        days_since_last_service: daysSinceService,
+        lifetime_value: c.lifetime_value,
+        churn_risk: c.model_outputs.churn_risk_score,
+        churn_risk_category: c.model_outputs.churn_risk_category,
+        purchase_propensity: c.model_outputs.purchase_propensity_score,
+        geographic_opportunity_score: c.model_outputs.geographic_opportunity_score,
+        assigned_dealer_id: assignedDealer?.dealer_id ?? c.branch_id,
+        assigned_dealer_name: assignedDealer?.name ?? c.branch_id,
+        assigned_dealer_distance_km: 0,
+        nearest_dealer_id: assignedDealer?.dealer_id ?? c.branch_id,
+        nearest_dealer_name: assignedDealer?.name ?? c.branch_id,
+        nearest_dealer_distance_km: 0,
+        region_id: c.region_id,
+        region_name: cityName,
+        district_id: c.district_id,
+        village_id: c.village_id,
+        product_primary: c.products[0]?.name ?? 'Primary Holding',
+        preferred_channel: c.demographic_attributes.preferred_channel,
+        latest_interaction_summary: latestInter
+          ? `${latestInter.type} (${latestInter.date} · ${latestInter.outcome})`
+          : `Last activity ${c.last_activity_date}`,
+        marker_group: deriveMarkerGroup(c),
+        has_consent: consent.hasConsent,
+        opted_out: consent.optedOut,
+        suppressed: consent.suppressed,
+      });
+      continue;
+    }
+
+    // Generate deterministic terrestrial land-validated coordinate inside territory ∩ landMask \ sea
+    const isAtRisk = c.status === 'At-Risk' || c.model_outputs.churn_risk_category === 'High';
+    const sampled = generateValidatedTerrestrialPoint({
+      seedKey: `cust-${c.tenant_id}-${c.customer_id}`,
+      provinceGeo,
+      territory,
+      anchorLat,
+      anchorLng,
+      preferOuterRing: isAtRisk,
+      isCompactMetro,
+    });
+
+    const latitude = sampled.latitude;
+    const longitude = sampled.longitude;
 
     // Find nearest dealer across tenant's active network
     let nearestDealer = assignedDealer;
@@ -555,12 +797,7 @@ export function buildGeocodedCustomers(
       ? haversineDistanceKm(latitude, longitude, assignedDealer.latitude, assignedDealer.longitude)
       : nearestDist;
 
-    const latestTx = c.transactions[0];
-    const lastPurchaseDate = latestTx?.date ?? c.last_activity_date;
-    const lastServiceDate = c.last_activity_date;
-    const daysSinceService = daysBetween(lastServiceDate);
-    const latestInter = c.interactions[0];
-    const consent = evaluateCustomerConsent(c);
+    const isValid = sampled.validation.isValidLandPoint;
 
     result.push({
       customer_id: c.customer_id,
@@ -572,8 +809,31 @@ export function buildGeocodedCustomers(
       lifecycle_stage: c.lifecycle_stage,
       latitude,
       longitude,
-      location_accuracy: districtAnchor ? 'District-Anchored Synthetic' : 'Urban Corridor Synthetic',
-      location_source: 'Synthetic Demo Geocoder (Illustrative)',
+      address_line: 'Simulated Point — Exact Address Unavailable',
+      village_name: villageName,
+      district_name: districtName,
+      city_name: cityName,
+      province_name: provinceName,
+      postal_code: postalCode,
+      reverse_geocoded_address: null,
+      geolocation_source: 'Deterministic Terrestrial Land-Mask Fixture (Synthetic Demo)',
+      geolocation_method: 'Constrained Village/District Land-Mask Sampling (EPSG:4326)',
+      geolocation_accuracy: villageAnchor
+        ? 'Village Terrestrial Zone (Synthetic)'
+        : 'District Terrestrial Zone (Synthetic)',
+      geolocation_confidence: villageAnchor ? 84 : 76,
+      geolocation_status: isValid ? 'SIMULATED_VALID_LAND_POINT' : 'INVALID_LOCATION',
+      coordinate_validation_status: sampled.validation.coordinateStatus,
+      land_validation_status: sampled.validation.landStatus,
+      territory_validation_status: sampled.validation.territoryStatus,
+      validation_issue: sampled.validation.issueDescription,
+      is_plottable: isValid,
+      geocoded_at: '2026-11-20 08:30',
+      last_verified_at: verifiedTimestamp,
+      location_accuracy: villageAnchor
+        ? 'Village Terrestrial Zone (Synthetic)'
+        : 'District Terrestrial Zone (Synthetic)',
+      location_source: 'Deterministic Terrestrial Land-Mask Fixture (Synthetic Demo)',
       last_purchase_date: lastPurchaseDate,
       last_service_date: lastServiceDate,
       days_since_last_service: daysSinceService,
@@ -589,7 +849,7 @@ export function buildGeocodedCustomers(
       nearest_dealer_name: nearestDealer?.name ?? c.branch_id,
       nearest_dealer_distance_km: Number(nearestDist.toFixed(2)),
       region_id: c.region_id,
-      region_name: reg?.name ?? c.demographic_attributes.city,
+      region_name: cityName,
       district_id: c.district_id,
       village_id: c.village_id,
       product_primary: c.products[0]?.name ?? 'Primary Holding',
@@ -604,6 +864,7 @@ export function buildGeocodedCustomers(
     });
   }
 
+  geocodedFixtureCache.set(cacheKey, result);
   return result;
 }
 
@@ -617,9 +878,10 @@ export const DEFAULT_GEO_FILTERS: GeoFilterState = {
   productOwnership: 'ALL',
   assignedDealerId: 'ALL',
   onlyOutsideCoverage: false,
+  geolocationStatus: 'ALL',
 };
 
-/** Filter geocoded customers across geographic hierarchy and multi-criteria attributes */
+/** Filter geocoded customers across geographic hierarchy, geolocation quality, and multi-criteria attributes */
 export function filterGeocodedCustomers(
   customers: GeocodedCustomer[],
   hierarchy: { regionId: string; districtId: string; villageId: string },
@@ -628,7 +890,7 @@ export function filterGeocodedCustomers(
 ): GeocodedCustomer[] {
   const q = filters.searchQuery.trim().toLowerCase();
 
-  // Compute dynamic high/mid LTV quantiles so value tier adapts to every industry (motorcycle vs banking vs automotive)
+  // Compute dynamic high/mid LTV quantiles so value tier adapts to every industry
   const sortedLtv = [...customers].map((c) => c.lifetime_value).sort((a, b) => a - b);
   const p70 = sortedLtv[Math.floor(sortedLtv.length * 0.7)] ?? 50_000_000;
   const p35 = sortedLtv[Math.floor(sortedLtv.length * 0.35)] ?? 20_000_000;
@@ -644,6 +906,12 @@ export function filterGeocodedCustomers(
       return false;
     }
     if (filters.productOwnership !== 'ALL' && c.product_primary !== filters.productOwnership) {
+      return false;
+    }
+    if (
+      filters.geolocationStatus !== 'ALL' &&
+      c.geolocation_status !== filters.geolocationStatus
+    ) {
       return false;
     }
 
@@ -672,12 +940,15 @@ export function filterGeocodedCustomers(
       if (filters.valueTier === 'Standard' && c.lifetime_value >= p35) return false;
     }
 
-    if (filters.onlyOutsideCoverage && c.nearest_dealer_distance_km <= coverageThresholdKm) {
+    if (
+      filters.onlyOutsideCoverage &&
+      (!c.is_plottable || c.nearest_dealer_distance_km <= coverageThresholdKm)
+    ) {
       return false;
     }
 
     if (q) {
-      const haystack = `${c.pseudonym_code} ${c.region_name} ${c.assigned_dealer_name} ${c.product_primary} ${c.customer_segment}`.toLowerCase();
+      const haystack = `${c.customer_id} ${c.pseudonym_code} ${c.village_name} ${c.district_name} ${c.city_name} ${c.region_name} ${c.assigned_dealer_name} ${c.product_primary} ${c.customer_segment} ${c.geolocation_status}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
 
@@ -701,33 +972,39 @@ export function filterCompetitors(
 }
 
 /**
- * Smart zoom-dependent deterministic spatial clustering.
- * Guarantees 100% total reconciliation: sum(cluster.count) === customers.length.
+ * Smart zoom-dependent deterministic spatial clustering with coastal-safe land positioning.
+ * - Includes ONLY validated, plottable on-land customer records (never plots invalid/unmapped rows).
+ * - Guarantees 100% total reconciliation: sum(cluster.count) === plottableCustomers.length.
+ * - Separates customer coordinates from cluster display location: if a mathematical centroid
+ *   falls offshore or outside territory, positions the cluster marker at the nearest valid
+ *   on-land member point (medoid) without ever mutating individual customer coordinates.
  */
 export function computeZoomClusters(
   customers: GeocodedCustomer[],
-  zoom: number
+  zoom: number,
+  provinceGeo?: ProvinceMapConfig
 ): GeoClusterNode[] {
-  if (customers.length === 0) return [];
+  const plottable = customers.filter(isPlottableCustomer);
+  if (plottable.length === 0) return [];
 
   // Low zoom (<= 9): group cleanly by regency/territory
   if (zoom <= 9) {
-    const byRegion = new Map<string, GeocodedCustomer[]>();
-    for (const c of customers) {
+    const byRegion = new Map<string, Array<GeocodedCustomer & { latitude: number; longitude: number }>>();
+    for (const c of plottable) {
       const list = byRegion.get(c.region_id) ?? [];
       list.push(c);
       byRegion.set(c.region_id, list);
     }
     return Array.from(byRegion.entries()).map(([regionId, group]) =>
-      buildClusterNode(`cl-reg-${regionId}`, group[0].region_name, regionId, group)
+      buildClusterNode(`cl-reg-${regionId}`, group[0].region_name, regionId, group, provinceGeo)
     );
   }
 
   // Medium (10-11) or high-zoom aggregated cluster mode (>= 12): spatial grid bucketing
   const cellDeg = zoom === 10 ? 0.085 : zoom === 11 ? 0.048 : 0.025;
-  const buckets = new Map<string, GeocodedCustomer[]>();
+  const buckets = new Map<string, Array<GeocodedCustomer & { latitude: number; longitude: number }>>();
 
-  for (const c of customers) {
+  for (const c of plottable) {
     const gx = Math.floor(c.latitude / cellDeg);
     const gy = Math.floor(c.longitude / cellDeg);
     const key = `${c.region_id}:${gx}:${gy}`;
@@ -741,7 +1018,8 @@ export function computeZoomClusters(
       `cl-grid-${key}-${idx}`,
       `${group[0].region_name} Zone ${idx + 1}`,
       group[0].region_id,
-      group
+      group,
+      provinceGeo
     )
   );
 }
@@ -750,7 +1028,8 @@ function buildClusterNode(
   id: string,
   label: string,
   regionId: string,
-  group: GeocodedCustomer[]
+  group: Array<GeocodedCustomer & { latitude: number; longitude: number }>,
+  provinceGeo?: ProvinceMapConfig
 ): GeoClusterNode {
   let sumLat = 0;
   let sumLng = 0;
@@ -779,13 +1058,54 @@ function buildClusterNode(
   }
 
   const n = group.length;
+  const meanLat = Number((sumLat / n).toFixed(5));
+  const meanLng = Number((sumLng / n).toFixed(5));
+
+  // Find nearest valid on-land member point to the mathematical centroid (medoid anchor)
+  let nearestMember = group[0];
+  let bestDistSq = Infinity;
+  for (const c of group) {
+    const dSq = (c.latitude - meanLat) ** 2 + (c.longitude - meanLng) ** 2;
+    if (dSq < bestDistSq) {
+      bestDistSq = dSq;
+      nearestMember = c;
+    }
+  }
+
+  let centroidOverWater = false;
+  let displayLat = nearestMember.latitude;
+  let displayLng = nearestMember.longitude;
+  let displayMethod: GeoClusterNode['display_method'] =
+    'Nearest Valid On-Land Member Anchor (Coastal-Safe)';
+
+  if (provinceGeo) {
+    const centroidCheck = validatePointAgainstLandAndTerritory(
+      meanLat,
+      meanLng,
+      provinceGeo,
+      regionId
+    );
+    centroidOverWater = centroidCheck.landStatus === 'IN_SEA_OR_WATER';
+    if (centroidCheck.isValidLandPoint) {
+      // Even when centroid is on land, using nearest valid on-land member guarantees zero coastal drift
+      // while documenting whether mathematical centroid itself was on land or over water.
+      displayLat = nearestMember.latitude;
+      displayLng = nearestMember.longitude;
+      displayMethod = 'Nearest Valid On-Land Member Anchor (Coastal-Safe)';
+    }
+  }
+
   const pad = 0.012;
   return {
     id,
     label,
     regionId,
-    latitude: Number((sumLat / n).toFixed(5)),
-    longitude: Number((sumLng / n).toFixed(5)),
+    latitude: displayLat,
+    longitude: displayLng,
+    centroid_latitude: meanLat,
+    centroid_longitude: meanLng,
+    display_method: displayMethod,
+    centroid_was_over_water: centroidOverWater,
     count: n,
     totalLtv,
     atRiskCount,
@@ -801,7 +1121,7 @@ function buildClusterNode(
 
 /**
  * Compute straight-line radius coverage catchment around a selected dealer.
- * Always reconciles: inside_count + outside_count === customers.length.
+ * Operates on validated plottable customers and reconciles inside_count + outside_count === plottable.length.
  */
 export function computeDealerCoverage(
   dealer: DealerNetworkNode,
@@ -810,6 +1130,7 @@ export function computeDealerCoverage(
   allDealers: DealerNetworkNode[]
 ): CoverageAnalysisResult {
   const safeRadius = Math.max(0.5, radiusKm);
+  const plottable = customers.filter(isPlottableCustomer);
   const inside: GeocodedCustomer[] = [];
   const outside: GeocodedCustomer[] = [];
   let insideLtv = 0;
@@ -817,7 +1138,7 @@ export function computeDealerCoverage(
   let sumInsideDist = 0;
   let sumAllDist = 0;
 
-  for (const c of customers) {
+  for (const c of plottable) {
     const km = haversineDistanceKm(dealer.latitude, dealer.longitude, c.latitude, c.longitude);
     sumAllDist += km;
     if (km <= safeRadius) {
@@ -837,6 +1158,7 @@ export function computeDealerCoverage(
     if (dist <= safeRadius * 2) {
       let shared = 0;
       for (const c of inside) {
+        if (c.latitude === null || c.longitude === null) continue;
         const dOther = haversineDistanceKm(other.latitude, other.longitude, c.latitude, c.longitude);
         if (dOther <= safeRadius) shared++;
       }
@@ -863,29 +1185,30 @@ export function computeDealerCoverage(
     inside_ltv: insideLtv,
     inside_at_risk_count: insideAtRisk,
     coverage_rate_pct:
-      customers.length > 0 ? Number(((inside.length / customers.length) * 100).toFixed(1)) : 0,
+      plottable.length > 0 ? Number(((inside.length / plottable.length) * 100).toFixed(1)) : 0,
     avg_distance_inside_km:
       inside.length > 0 ? Number((sumInsideDist / inside.length).toFixed(2)) : 0,
     avg_distance_all_km:
-      customers.length > 0 ? Number((sumAllDist / customers.length).toFixed(2)) : 0,
+      plottable.length > 0 ? Number((sumAllDist / plottable.length).toFixed(2)) : 0,
     overlapping_dealers: overlapping,
   };
 }
 
 /**
- * Customer-to-Dealer network intelligence summary for the active customer scope.
+ * Customer-to-Dealer network intelligence summary for the active validated customer scope.
  */
 export function computeCustomerToDealerInsights(
   customers: GeocodedCustomer[],
   dealers: DealerNetworkNode[],
   thresholdKm: number
 ): CustomerToDealerInsights {
+  const plottable = customers.filter(isPlottableCustomer);
   let nearDealer = 0;
   let outsideCoverage = 0;
   let assignedNonNearest = 0;
   let overlappingCatchment = 0;
 
-  for (const c of customers) {
+  for (const c of plottable) {
     if (c.nearest_dealer_distance_km <= thresholdKm) {
       nearDealer++;
     } else {
@@ -954,7 +1277,7 @@ export function isPointInGeometry(
 }
 
 /**
- * Evaluate a user-drawn Rectangle, Polygon, or Radius selection against filtered customers,
+ * Evaluate a user-drawn Rectangle, Polygon, or Radius selection against validated customers,
  * dealers, and competitors for direct campaign activation.
  */
 export function evaluateGeoSelection(
@@ -965,7 +1288,9 @@ export function evaluateGeoSelection(
   competitors: CompetitorLocation[],
   coverageThresholdKm: number
 ): GeoSelectionSummary {
-  const matching = customers.filter((c) => isPointInGeometry(c.latitude, c.longitude, geometry));
+  const matching = customers
+    .filter(isPlottableCustomer)
+    .filter((c) => isPointInGeometry(c.latitude, c.longitude, geometry));
   const nearbyDealers = dealers.filter((d) => isPointInGeometry(d.latitude, d.longitude, geometry));
   const nearbyCompetitors = competitors.filter((comp) =>
     isPointInGeometry(comp.latitude, comp.longitude, geometry)
@@ -1251,39 +1576,61 @@ export function buildPresetSavedViews(
   ];
 }
 
-export function hasValidWgs84Coordinate(lat: number, lng: number): boolean {
-  return (
-    Number.isFinite(lat) &&
-    Number.isFinite(lng) &&
-    lat >= -90 &&
-    lat <= 90 &&
-    lng >= -180 &&
-    lng <= 180 &&
-    !(lat === 0 && lng === 0)
-  );
+export function hasValidWgs84Coordinate(
+  lat: number | null | undefined,
+  lng: number | null | undefined
+): boolean {
+  return isValidWgs84Coordinate(lat, lng);
 }
 
 /**
  * Reconciles customer visibility counts strictly from the same filtered dataset:
- * Total = Mapped + Unmapped, and Visible = Mapped points inside current map viewport bounds.
+ * - Total = Mapped (validated plottable) + Unmapped (Invalid + Not Geocoded)
+ * - Visible = Mapped plottable points inside current map viewport bounds.
  */
 export function computeCustomerMapCounts(
-  customers: ReadonlyArray<Pick<GeocodedCustomer, 'latitude' | 'longitude'>>,
+  customers: ReadonlyArray<
+    Pick<GeocodedCustomer, 'latitude' | 'longitude'> & {
+      is_plottable?: boolean;
+      geolocation_status?: GeocodedCustomer['geolocation_status'];
+    }
+  >,
   viewportBounds: GeoViewportBounds | null
 ): CustomerMapCounts {
   const total = customers.length;
   let mapped = 0;
   let visible = 0;
+  let invalid = 0;
+  let notGeocoded = 0;
 
   for (const c of customers) {
-    if (!hasValidWgs84Coordinate(c.latitude, c.longitude)) continue;
+    const isPlottable =
+      c.is_plottable !== undefined
+        ? c.is_plottable && isValidWgs84Coordinate(c.latitude, c.longitude)
+        : isValidWgs84Coordinate(c.latitude, c.longitude);
+
+    if (!isPlottable) {
+      if (
+        c.geolocation_status === 'NOT_GEOCODED' ||
+        c.latitude === null ||
+        c.longitude === null
+      ) {
+        notGeocoded += 1;
+      } else {
+        invalid += 1;
+      }
+      continue;
+    }
+
     mapped += 1;
+    const lat = c.latitude as number;
+    const lng = c.longitude as number;
     if (
       !viewportBounds ||
-      (c.latitude >= viewportBounds.south &&
-        c.latitude <= viewportBounds.north &&
-        c.longitude >= viewportBounds.west &&
-        c.longitude <= viewportBounds.east)
+      (lat >= viewportBounds.south &&
+        lat <= viewportBounds.north &&
+        lng >= viewportBounds.west &&
+        lng <= viewportBounds.east)
     ) {
       visible += 1;
     }
@@ -1294,6 +1641,8 @@ export function computeCustomerMapCounts(
     mapped,
     visible,
     unmapped: total - mapped,
+    invalid,
+    notGeocoded,
   };
 }
 
